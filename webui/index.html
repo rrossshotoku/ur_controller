@@ -13,6 +13,7 @@
             <div id="connection-status" class="disconnected">
                 <span class="status-dot"></span>
                 <span class="status-text">Disconnected</span>
+                <button id="btn-reconnect" class="btn btn-small btn-primary">Reconnect</button>
             </div>
         </header>
 
@@ -69,8 +70,61 @@
                     </div>
                 </div>
             </div>
+
+            <!-- Trajectory Panel -->
+            <div class="panel-container trajectory-section">
+                <div class="panel" id="trajectory-panel">
+                    <h2>Trajectory Planner</h2>
+                    <div class="trajectory-controls">
+                        <button id="btn-add-waypoint" class="btn btn-primary">Add Current Pose</button>
+                        <button id="btn-clear-waypoints" class="btn btn-secondary">Clear All</button>
+                        <button id="btn-plan-trajectory" class="btn btn-primary" disabled>Plan</button>
+                        <button id="btn-execute-trajectory" class="btn btn-success" disabled>Execute</button>
+                        <button id="btn-stop-trajectory" class="btn btn-danger">Stop</button>
+                    </div>
+
+                    <div id="waypoint-list">
+                        <h3>Waypoints</h3>
+                        <div id="waypoints-container"></div>
+                    </div>
+
+                    <div id="trajectory-status" class="hidden">
+                        <h3>Trajectory Status</h3>
+                        <div class="status-row">
+                            <span class="label">State:</span>
+                            <span id="traj-state">Idle</span>
+                        </div>
+                        <div class="status-row">
+                            <span class="label">Progress:</span>
+                            <span id="traj-progress">0%</span>
+                        </div>
+                        <div class="progress-bar">
+                            <div id="traj-progress-bar" class="progress-fill"></div>
+                        </div>
+                        <div class="status-row">
+                            <span class="label">Duration:</span>
+                            <span id="traj-duration">0.0s</span>
+                        </div>
+                    </div>
+
+                    <div id="validation-messages" class="hidden">
+                        <h3>Validation</h3>
+                        <div id="messages-container"></div>
+                    </div>
+                </div>
+
+                <div class="panel" id="timing-panel">
+                    <h2>Timing Graph</h2>
+                    <div id="chart-container">
+                        <canvas id="timing-chart"></canvas>
+                    </div>
+                </div>
+            </div>
         </main>
     </div>
+
+    <!-- Chart.js for timing graphs -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 
     <!-- Three.js and URDF loader from CDN -->
     <script type="importmap">

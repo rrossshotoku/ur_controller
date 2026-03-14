@@ -3,12 +3,14 @@
 import { RobotViewer } from './robot-viewer.js';
 import { ControlPanel } from './control-panel.js';
 import { WebSocketClient } from './websocket-client.js';
+import { TrajectoryPanel } from './trajectory-panel.js';
 
 class App {
     constructor() {
         this.robotViewer = null;
         this.controlPanel = null;
         this.wsClient = null;
+        this.trajectoryPanel = null;
         this.controlEnabled = false;
 
         this.init();
@@ -26,6 +28,13 @@ class App {
             onSnapToCurrent: () => this.snapToCurrent()
         });
 
+        // Initialize trajectory panel
+        this.trajectoryPanel = new TrajectoryPanel({
+            onPathUpdate: (path) => this.updateTrajectoryPath(path)
+        });
+        // Expose for inline event handlers
+        window.trajectoryPanel = this.trajectoryPanel;
+
         // Initialize WebSocket connection
         this.wsClient = new WebSocketClient({
             onStateUpdate: (state) => this.handleStateUpdate(state),
@@ -39,10 +48,17 @@ class App {
         this.wsClient.connect();
     }
 
+    updateTrajectoryPath(path) {
+        if (this.robotViewer && this.robotViewer.updateTrajectoryPath) {
+            this.robotViewer.updateTrajectoryPath(path);
+        }
+    }
+
     setupButtonHandlers() {
         const btnEnable = document.getElementById('btn-enable');
         const btnStop = document.getElementById('btn-stop');
         const btnSnap = document.getElementById('btn-snap');
+        const btnReconnect = document.getElementById('btn-reconnect');
 
         btnEnable.addEventListener('click', () => {
             this.controlEnabled = !this.controlEnabled;
@@ -59,6 +75,60 @@ class App {
         btnSnap.addEventListener('click', () => {
             this.snapToCurrent();
         });
+
+        btnReconnect.addEventListener('click', () => {
+            this.reconnectToRobot();
+        });
+    }
+
+    async reconnectToRobot() {
+        const statusEl = document.getElementById('connection-status');
+        const statusText = statusEl.querySelector('.status-text');
+        const btnReconnect = document.getElementById('btn-reconnect');
+
+        // Show connecting state
+        statusEl.classList.remove('connected', 'disconnected');
+        statusEl.classList.add('connecting');
+        statusText.textContent = 'Connecting...';
+        btnReconnect.disabled = true;
+        btnReconnect.textContent = 'Connecting...';
+
+        try {
+            // First try to connect
+            const connectResponse = await fetch('/api/connect', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({})
+            });
+            const connectResult = await connectResponse.json();
+            console.log('Connect result:', connectResult);
+
+            // Then try to enable control
+            const enableResponse = await fetch('/api/enable-control', {
+                method: 'POST'
+            });
+            const enableResult = await enableResponse.json();
+            console.log('Enable control result:', enableResult);
+
+            if (enableResult.success) {
+                statusEl.classList.remove('connecting', 'disconnected');
+                statusEl.classList.add('connected');
+                statusText.textContent = 'Connected';
+            } else {
+                statusEl.classList.remove('connecting', 'connected');
+                statusEl.classList.add('disconnected');
+                statusText.textContent = 'No Control';
+                console.warn('Enable control failed:', enableResult.message);
+            }
+        } catch (err) {
+            console.error('Reconnect failed:', err);
+            statusEl.classList.remove('connecting', 'connected');
+            statusEl.classList.add('disconnected');
+            statusText.textContent = 'Error';
+        } finally {
+            btnReconnect.disabled = false;
+            btnReconnect.textContent = 'Reconnect';
+        }
     }
 
     handleStateUpdate(state) {

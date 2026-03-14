@@ -29,7 +29,7 @@ body {
 #app {
     display: flex;
     flex-direction: column;
-    height: 100vh;
+    min-height: 100vh;
 }
 
 /* Header */
@@ -67,17 +67,39 @@ header h1 {
     background-color: var(--accent-green);
 }
 
+#connection-status #btn-reconnect {
+    margin-left: 10px;
+    padding: 4px 10px;
+    font-size: 0.8rem;
+}
+
+#connection-status.connecting .status-dot {
+    background-color: var(--accent-orange);
+    animation: pulse 1s infinite;
+}
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+}
+
 /* Main content */
 main {
     flex: 1;
     padding: 15px;
-    overflow: hidden;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 15px;
 }
 
 .panel-container {
     display: flex;
     gap: 15px;
-    height: 100%;
+}
+
+.panel-container:first-child {
+    min-height: 500px;
 }
 
 .panel {
@@ -106,13 +128,14 @@ main {
     flex: 2;
     display: flex;
     flex-direction: column;
+    min-height: 450px;
 }
 
 #robot-viewer {
     flex: 1;
     background-color: var(--bg-secondary);
     border-radius: 4px;
-    min-height: 400px;
+    min-height: 350px;
 }
 
 /* Side panels */
@@ -263,6 +286,159 @@ main {
     display: none;
 }
 
+/* Trajectory Panel */
+.trajectory-section {
+    height: auto;
+    min-height: 300px;
+}
+
+#trajectory-panel {
+    flex: 2;
+    min-width: 400px;
+}
+
+#timing-panel {
+    flex: 1;
+    min-width: 350px;
+    max-width: 500px;
+}
+
+#chart-container {
+    position: relative;
+    width: 100%;
+    height: 200px;
+}
+
+#timing-chart {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100% !important;
+    height: 100% !important;
+}
+
+.trajectory-controls {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-bottom: 15px;
+}
+
+.btn-success {
+    background-color: var(--accent-green);
+    color: white;
+}
+
+/* Waypoint list */
+#waypoints-container {
+    max-height: 200px;
+    overflow-y: auto;
+}
+
+.waypoint-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 10px;
+    background-color: var(--bg-secondary);
+    border-radius: 4px;
+    margin-bottom: 8px;
+    border: 1px solid var(--border-color);
+}
+
+.waypoint-item:hover {
+    border-color: var(--accent-blue);
+}
+
+.waypoint-info {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.waypoint-index {
+    font-weight: 500;
+    color: var(--accent-blue);
+}
+
+.waypoint-position {
+    font-family: monospace;
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+}
+
+.waypoint-controls {
+    display: flex;
+    gap: 5px;
+}
+
+.waypoint-input {
+    width: 60px;
+    padding: 4px 6px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    color: var(--text-primary);
+    font-size: 0.8rem;
+}
+
+.waypoint-input:focus {
+    outline: none;
+    border-color: var(--accent-blue);
+}
+
+.btn-small {
+    padding: 4px 8px;
+    font-size: 0.8rem;
+}
+
+/* Progress bar */
+.progress-bar {
+    height: 8px;
+    background: var(--bg-secondary);
+    border-radius: 4px;
+    margin: 10px 0;
+    overflow: hidden;
+}
+
+.progress-fill {
+    height: 100%;
+    background: var(--accent-blue);
+    transition: width 0.1s linear;
+    width: 0%;
+}
+
+/* Validation messages */
+#messages-container {
+    max-height: 150px;
+    overflow-y: auto;
+}
+
+.validation-message {
+    padding: 6px 10px;
+    margin-bottom: 5px;
+    border-radius: 4px;
+    font-size: 0.85rem;
+}
+
+.validation-message.error {
+    background-color: rgba(255, 68, 68, 0.2);
+    color: var(--accent-red);
+    border-left: 3px solid var(--accent-red);
+}
+
+.validation-message.warning {
+    background-color: rgba(255, 153, 0, 0.2);
+    color: var(--accent-orange);
+    border-left: 3px solid var(--accent-orange);
+}
+
+.validation-message.info {
+    background-color: rgba(0, 153, 255, 0.2);
+    color: var(--accent-blue);
+    border-left: 3px solid var(--accent-blue);
+}
+
 /* Responsive */
 @media (max-width: 900px) {
     .panel-container {
@@ -275,5 +451,13 @@ main {
 
     #robot-viewer {
         min-height: 300px;
+    }
+
+    .trajectory-section {
+        flex-direction: column;
+    }
+
+    #timing-panel {
+        min-width: auto;
     }
 }

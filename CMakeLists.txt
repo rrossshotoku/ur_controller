@@ -106,6 +106,36 @@ endif()
 # Library
 # --------------------------------------------------------------------------
 
+# Kinematics library
+add_library(ur_kinematics
+    src/kinematics/dh_parameters.cpp
+    src/kinematics/ur_kinematics.cpp
+)
+target_include_directories(ur_kinematics PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+)
+target_link_libraries(ur_kinematics PUBLIC
+    Eigen3::Eigen
+)
+
+# Trajectory library
+add_library(ur_trajectory
+    src/trajectory/types.cpp
+    src/trajectory/validator.cpp
+    src/trajectory/planner.cpp
+    src/trajectory/executor.cpp
+)
+target_include_directories(ur_trajectory PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+)
+target_link_libraries(ur_trajectory PUBLIC
+    ur_kinematics
+    Eigen3::Eigen
+    ruckig::ruckig
+)
+
 # Main library (will be populated as we add modules)
 add_library(ur_controller_lib INTERFACE)
 target_include_directories(ur_controller_lib INTERFACE
@@ -113,6 +143,8 @@ target_include_directories(ur_controller_lib INTERFACE
     $<INSTALL_INTERFACE:include>
 )
 target_link_libraries(ur_controller_lib INTERFACE
+    ur_kinematics
+    ur_trajectory
     Eigen3::Eigen
     ur_rtde::rtde
     yaml-cpp

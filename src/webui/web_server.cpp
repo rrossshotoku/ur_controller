@@ -15,10 +15,27 @@ namespace webui {
 WebServer::WebServer(const WebServerConfig& config)
     : config_(config)
     , state_manager_(std::make_unique<RobotStateManager>(config.robot_ip))
-    , ws_broadcaster_(std::make_unique<WebSocketBroadcaster>()) {
+    , ws_broadcaster_(std::make_unique<WebSocketBroadcaster>())
+    , kinematics_(std::make_unique<kinematics::URKinematics>(kinematics::URModel::UR5e))
+    , trajectory_planner_(std::make_unique<trajectory::TrajectoryPlanner>(*kinematics_))
+    , trajectory_executor_(std::make_unique<trajectory::TrajectoryExecutor>()) {
+
+    // Set up trajectory executor to use servoJ
+    trajectory_executor_->setCommandCallback(
+        [this](const kinematics::JointVector& joints, double time) {
+            (void)time;  // Unused
+            if (state_manager_->hasControl()) {
+                std::array<double, 6> q;
+                for (int i = 0; i < 6; ++i) {
+                    q[static_cast<size_t>(i)] = joints[i];
+                }
+                state_manager_->servoJ(q);
+            }
+        });
 
     setupRoutes();
     setupWebSocket();
+    setupTrajectoryRoutes();
 }
 
 WebServer::~WebServer() {
@@ -300,6 +317,301 @@ void WebServer::setupWebSocket() {
                 state_manager_->stopJ();
             }
         });
+}
+
+void WebServer::setupTrajectoryRoutes() {
+    // API: Plan trajectory from waypoints
+    CROW_ROUTE(app_, "/api/trajectory/plan").methods("POST"_method)
+    ([this](const crow::request& req) {
+        crow::json::wvalue result;
+
+        auto body = crow::json::load(req.body);
+        if (!body || !body.has("waypoints")) {
+            result["success"] = false;
+            result["message"] = "Missing 'waypoints' array";
+            return crow::response(400, result);
+        }
+
+        // Parse waypoints
+        std::vector<trajectory::Waypoint> waypoints;
+        auto wp_array = body["waypoints"];
+        for (size_t i = 0; i < wp_array.size(); ++i) {
+            auto& wp_json = wp_array[i];
+            trajectory::Waypoint wp;
+
+            // Position
+            if (wp_json.has("position")) {
+                auto& pos = wp_json["position"];
+                wp.position.x() = pos.has("x") ? pos["x"].d() : 0.0;
+                wp.position.y() = pos.has("y") ? pos["y"].d() : 0.0;
+                wp.position.z() = pos.has("z") ? pos["z"].d() : 0.0;
+            }
+
+            // Orientation (quaternion)
+            if (wp_json.has("orientation")) {
+                auto& ori = wp_json["orientation"];
+                double w = ori.has("w") ? ori["w"].d() : 1.0;
+                double x = ori.has("x") ? ori["x"].d() : 0.0;
+                double y = ori.has("y") ? ori["y"].d() : 0.0;
+                double z = ori.has("z") ? ori["z"].d() : 0.0;
+                wp.orientation = Eigen::Quaterniond(w, x, y, z).normalized();
+            }
+
+            // Optional parameters
+            if (wp_json.has("blend_radius")) {
+                wp.blend_radius = wp_json["blend_radius"].d();
+            }
+            if (wp_json.has("segment_time")) {
+                wp.segment_time = wp_json["segment_time"].d();
+            }
+            if (wp_json.has("pause_time")) {
+                wp.pause_time = wp_json["pause_time"].d();
+            }
+
+            waypoints.push_back(wp);
+        }
+
+        // Parse optional config
+        if (body.has("config")) {
+            auto& cfg = body["config"];
+            trajectory::TrajectoryConfig config;
+            if (cfg.has("max_linear_velocity")) {
+                config.max_linear_velocity = cfg["max_linear_velocity"].d();
+            }
+            if (cfg.has("max_linear_acceleration")) {
+                config.max_linear_acceleration = cfg["max_linear_acceleration"].d();
+            }
+            if (cfg.has("max_joint_velocity")) {
+                config.max_joint_velocity = cfg["max_joint_velocity"].d();
+            }
+            trajectory_planner_->setConfig(config);
+        }
+
+        // Plan trajectory
+        auto planned = trajectory_planner_->plan(waypoints);
+
+        // Store for later execution
+        current_waypoints_ = waypoints;
+        current_trajectory_ = planned;
+
+        // Build response
+        result["success"] = planned.valid;
+        result["valid"] = planned.valid;
+        result["duration"] = planned.total_duration;
+        result["num_samples"] = planned.samples.size();
+
+        // Validation messages
+        crow::json::wvalue messages;
+        for (size_t i = 0; i < planned.messages.size(); ++i) {
+            crow::json::wvalue msg;
+            msg["severity"] = planned.messages[i].severity == trajectory::ValidationSeverity::Error ? "error" :
+                              planned.messages[i].severity == trajectory::ValidationSeverity::Warning ? "warning" : "info";
+            msg["message"] = planned.messages[i].message;
+            if (planned.messages[i].waypoint_index.has_value()) {
+                msg["waypoint"] = *planned.messages[i].waypoint_index;
+            }
+            messages[i] = std::move(msg);
+        }
+        result["messages"] = std::move(messages);
+
+        // Generate visualization data
+        if (planned.valid) {
+            auto viz = trajectory_planner_->generateVisualization(planned, waypoints);
+
+            crow::json::wvalue viz_json;
+
+            // Path points
+            crow::json::wvalue path_points;
+            for (size_t i = 0; i < viz.path_points.size(); ++i) {
+                crow::json::wvalue point;
+                point["x"] = viz.path_points[i].x();
+                point["y"] = viz.path_points[i].y();
+                point["z"] = viz.path_points[i].z();
+                point["time"] = viz.path_times[i];
+                path_points[i] = std::move(point);
+            }
+            viz_json["path"] = std::move(path_points);
+
+            // Timing data for graphs
+            crow::json::wvalue timing;
+            for (size_t i = 0; i < viz.times.size(); ++i) {
+                crow::json::wvalue point;
+                point["time"] = viz.times[i];
+                point["speed"] = viz.speeds[i];
+                point["acceleration"] = i < viz.accelerations.size() ? viz.accelerations[i] : 0.0;
+                timing[i] = std::move(point);
+            }
+            viz_json["timing"] = std::move(timing);
+
+            // Waypoint markers
+            crow::json::wvalue wp_markers;
+            for (size_t i = 0; i < viz.waypoints.size(); ++i) {
+                crow::json::wvalue marker;
+                marker["index"] = viz.waypoints[i].index;
+                marker["x"] = viz.waypoints[i].position.x();
+                marker["y"] = viz.waypoints[i].position.y();
+                marker["z"] = viz.waypoints[i].position.z();
+                marker["time"] = viz.waypoints[i].time;
+                marker["blend_radius"] = viz.waypoints[i].blend_radius;
+                marker["has_pause"] = viz.waypoints[i].has_pause;
+                wp_markers[i] = std::move(marker);
+            }
+            viz_json["waypoints"] = std::move(wp_markers);
+
+            // Summary
+            viz_json["total_duration"] = viz.total_duration;
+            viz_json["total_distance"] = viz.total_distance;
+            viz_json["max_speed"] = viz.max_speed;
+
+            result["visualization"] = std::move(viz_json);
+        }
+
+        return crow::response(result);
+    });
+
+    // API: Execute planned trajectory
+    CROW_ROUTE(app_, "/api/trajectory/execute").methods("POST"_method)
+    ([this]() {
+        crow::json::wvalue result;
+
+        if (!current_trajectory_.has_value() || !current_trajectory_->valid) {
+            result["success"] = false;
+            result["message"] = "No valid trajectory planned";
+            return crow::response(400, result);
+        }
+
+        if (!state_manager_->hasControl()) {
+            result["success"] = false;
+            result["message"] = "Control not available";
+            return crow::response(400, result);
+        }
+
+        // Load and start execution
+        if (!trajectory_executor_->load(*current_trajectory_)) {
+            result["success"] = false;
+            result["message"] = "Failed to load trajectory";
+            return crow::response(500, result);
+        }
+
+        if (!trajectory_executor_->start()) {
+            result["success"] = false;
+            result["message"] = "Failed to start execution";
+            return crow::response(500, result);
+        }
+
+        result["success"] = true;
+        result["message"] = "Trajectory execution started";
+        result["duration"] = current_trajectory_->total_duration;
+
+        return crow::response(result);
+    });
+
+    // API: Get trajectory execution status
+    CROW_ROUTE(app_, "/api/trajectory/status")
+    ([this]() {
+        auto progress = trajectory_executor_->progress();
+
+        crow::json::wvalue result;
+        result["state"] = trajectory::executorStateToString(progress.state);
+        result["current_time"] = progress.current_time;
+        result["total_duration"] = progress.total_duration;
+        result["progress_percent"] = progress.progress_percent;
+        result["current_speed"] = progress.current_speed;
+
+        crow::json::wvalue joints;
+        for (int i = 0; i < 6; ++i) {
+            joints[static_cast<size_t>(i)] = progress.current_joints[i];
+        }
+        result["joints"] = std::move(joints);
+
+        crow::json::wvalue tcp;
+        tcp["x"] = progress.current_pose.translation().x();
+        tcp["y"] = progress.current_pose.translation().y();
+        tcp["z"] = progress.current_pose.translation().z();
+        result["tcp"] = std::move(tcp);
+
+        return crow::response(result);
+    });
+
+    // API: Pause trajectory execution
+    CROW_ROUTE(app_, "/api/trajectory/pause").methods("POST"_method)
+    ([this]() {
+        trajectory_executor_->pause();
+
+        crow::json::wvalue result;
+        result["success"] = true;
+        result["state"] = trajectory::executorStateToString(trajectory_executor_->state());
+
+        return crow::response(result);
+    });
+
+    // API: Resume trajectory execution
+    CROW_ROUTE(app_, "/api/trajectory/resume").methods("POST"_method)
+    ([this]() {
+        trajectory_executor_->resume();
+
+        crow::json::wvalue result;
+        result["success"] = true;
+        result["state"] = trajectory::executorStateToString(trajectory_executor_->state());
+
+        return crow::response(result);
+    });
+
+    // API: Stop trajectory execution
+    CROW_ROUTE(app_, "/api/trajectory/stop").methods("POST"_method)
+    ([this]() {
+        trajectory_executor_->stop();
+        state_manager_->stopJ();
+
+        crow::json::wvalue result;
+        result["success"] = true;
+        result["message"] = "Trajectory stopped";
+
+        return crow::response(result);
+    });
+
+    // API: Get current robot pose as waypoint
+    CROW_ROUTE(app_, "/api/trajectory/current-pose")
+    ([this]() {
+        auto state = state_manager_->getState();
+
+        crow::json::wvalue result;
+
+        // Get TCP pose from state
+        crow::json::wvalue position;
+        position["x"] = state.tcp_pose[0];
+        position["y"] = state.tcp_pose[1];
+        position["z"] = state.tcp_pose[2];
+        result["position"] = std::move(position);
+
+        // Convert axis-angle to quaternion
+        double rx = state.tcp_pose[3];
+        double ry = state.tcp_pose[4];
+        double rz = state.tcp_pose[5];
+        double angle = std::sqrt(rx*rx + ry*ry + rz*rz);
+        Eigen::Quaterniond q;
+        if (angle > 1e-6) {
+            Eigen::Vector3d axis(rx/angle, ry/angle, rz/angle);
+            q = Eigen::Quaterniond(Eigen::AngleAxisd(angle, axis));
+        } else {
+            q = Eigen::Quaterniond::Identity();
+        }
+
+        crow::json::wvalue orientation;
+        orientation["w"] = q.w();
+        orientation["x"] = q.x();
+        orientation["y"] = q.y();
+        orientation["z"] = q.z();
+        result["orientation"] = std::move(orientation);
+
+        crow::json::wvalue joints;
+        for (size_t i = 0; i < 6; ++i) {
+            joints[i] = state.joint_positions[i];
+        }
+        result["joints"] = std::move(joints);
+
+        return crow::response(result);
+    });
 }
 
 void WebServer::startStateUpdateThread() {

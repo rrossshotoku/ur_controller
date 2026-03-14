@@ -9,6 +9,8 @@ export class RobotViewer {
     constructor(container) {
         this.container = container;
         this.robot = null;
+        this.trajectoryLine = null;
+        this.waypointMarkers = [];
         this.jointNames = [
             'shoulder_pan_joint',
             'shoulder_lift_joint',
@@ -140,5 +142,65 @@ export class RobotViewer {
 
         // Add text indicating URDF failed to load
         console.warn('Robot visualization using fallback - URDF loader failed');
+    }
+
+    // Update trajectory path visualization
+    updateTrajectoryPath(path) {
+        // Remove existing trajectory line
+        if (this.trajectoryLine) {
+            this.scene.remove(this.trajectoryLine);
+            this.trajectoryLine.geometry.dispose();
+            this.trajectoryLine.material.dispose();
+            this.trajectoryLine = null;
+        }
+
+        // Remove existing waypoint markers
+        this.waypointMarkers.forEach(marker => {
+            this.scene.remove(marker);
+            marker.geometry.dispose();
+            marker.material.dispose();
+        });
+        this.waypointMarkers = [];
+
+        // If no path, we're done
+        if (!path || path.length === 0) return;
+
+        // Create path line
+        const points = path.map(p => new THREE.Vector3(p.x, p.z, -p.y));  // Convert to Y-up
+
+        const geometry = new THREE.BufferGeometry().setFromPoints(points);
+        const material = new THREE.LineBasicMaterial({
+            color: 0x00ff88,
+            linewidth: 2
+        });
+
+        this.trajectoryLine = new THREE.Line(geometry, material);
+        this.scene.add(this.trajectoryLine);
+
+        // Add waypoint markers at key points
+        const markerGeometry = new THREE.SphereGeometry(0.015, 16, 16);
+        const markerMaterial = new THREE.MeshBasicMaterial({ color: 0x0099ff });
+
+        // Add markers every N points
+        const step = Math.max(1, Math.floor(path.length / 20));
+        for (let i = 0; i < path.length; i += step) {
+            const p = path[i];
+            const marker = new THREE.Mesh(markerGeometry.clone(), markerMaterial.clone());
+            marker.position.set(p.x, p.z, -p.y);  // Convert to Y-up
+            this.scene.add(marker);
+            this.waypointMarkers.push(marker);
+        }
+
+        // Always add end point marker
+        if (path.length > 1) {
+            const endPoint = path[path.length - 1];
+            const endMarker = new THREE.Mesh(
+                new THREE.SphereGeometry(0.02, 16, 16),
+                new THREE.MeshBasicMaterial({ color: 0xff4444 })
+            );
+            endMarker.position.set(endPoint.x, endPoint.z, -endPoint.y);
+            this.scene.add(endMarker);
+            this.waypointMarkers.push(endMarker);
+        }
     }
 }
