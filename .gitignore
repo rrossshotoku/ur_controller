@@ -1,0 +1,45 @@
+# Build directories
+build/
+build-*/
+cmake-build-*/
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.cache/
+
+# Compiled files
+*.o
+*.a
+*.so
+*.dylib
+
+# Generated files
+compile_commands.json
+.clangd/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Docker volumes (handled by Docker)
+docker/volumes/
+
+# Claude temporary files
+.claude/
+tmpclaude-*
+
+# ImGui settings
+imgui.ini
+
+# Misc
+nul
+
+# Downloaded UR description (meshes are copied to urdf/)
+webui/ur_description_tmp/
+
+# Old meshes directory
+meshes/

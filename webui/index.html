@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>UR Controller - Web Interface</title>
+    <link rel="stylesheet" href="/css/styles.css">
+</head>
+<body>
+    <div id="app">
+        <header>
+            <h1>UR Controller</h1>
+            <div id="connection-status" class="disconnected">
+                <span class="status-dot"></span>
+                <span class="status-text">Disconnected</span>
+            </div>
+        </header>
+
+        <main>
+            <div class="panel-container">
+                <div class="panel" id="robot-view-panel">
+                    <h2>Robot View</h2>
+                    <div id="robot-viewer"></div>
+                </div>
+
+                <div class="side-panels">
+                    <div class="panel" id="control-panel">
+                        <h2>Joint Control</h2>
+                        <div id="control-warning" class="warning hidden">
+                            Control not available - enable Remote Control on pendant
+                        </div>
+                        <div id="joint-sliders"></div>
+                        <div class="control-buttons">
+                            <button id="btn-enable" class="btn btn-primary" disabled>Enable Control</button>
+                            <button id="btn-stop" class="btn btn-danger">Stop</button>
+                            <button id="btn-snap" class="btn btn-secondary">Snap to Current</button>
+                        </div>
+                    </div>
+
+                    <div class="panel" id="status-panel">
+                        <h2>Status</h2>
+                        <div id="robot-status">
+                            <div class="status-row">
+                                <span class="label">Mode:</span>
+                                <span id="robot-mode">Unknown</span>
+                            </div>
+                            <div class="status-row">
+                                <span class="label">Safety:</span>
+                                <span id="safety-status">Unknown</span>
+                            </div>
+                            <div class="status-row">
+                                <span class="label">Speed:</span>
+                                <span id="speed-scaling">0%</span>
+                            </div>
+                        </div>
+                        <h3>TCP Pose</h3>
+                        <div id="tcp-pose">
+                            <div class="tcp-row">
+                                <span>X: <span id="tcp-x">0.000</span> m</span>
+                                <span>Y: <span id="tcp-y">0.000</span> m</span>
+                                <span>Z: <span id="tcp-z">0.000</span> m</span>
+                            </div>
+                            <div class="tcp-row">
+                                <span>Rx: <span id="tcp-rx">0.000</span></span>
+                                <span>Ry: <span id="tcp-ry">0.000</span></span>
+                                <span>Rz: <span id="tcp-rz">0.000</span></span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Three.js and URDF loader from CDN -->
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+            "three/examples/jsm/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+        }
+    }
+    </script>
+
+    <script type="module" src="/js/app.js"></script>
+</body>
+</html>

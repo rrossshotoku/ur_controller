@@ -1,0 +1,144 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<robot name="ur5e">
+  <!-- UR5e URDF for web visualization -->
+  <!-- Based on official Universal Robots parameters -->
+
+  <!-- Link definitions with correct visual mesh offsets -->
+  <link name="base_link"/>
+
+  <link name="base_link_inertia">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 3.14159265359"/>
+      <geometry>
+        <mesh filename="meshes/ur5e/visual/base.dae"/>
+      </geometry>
+    </visual>
+  </link>
+
+  <link name="shoulder_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 3.14159265359"/>
+      <geometry>
+        <mesh filename="meshes/ur5e/visual/shoulder.dae"/>
+      </geometry>
+    </visual>
+  </link>
+
+  <link name="upper_arm_link">
+    <visual>
+      <origin xyz="0 0 0.138" rpy="1.5707963268 0 -1.5707963268"/>
+      <geometry>
+        <mesh filename="meshes/ur5e/visual/upperarm.dae"/>
+      </geometry>
+    </visual>
+  </link>
+
+  <link name="forearm_link">
+    <visual>
+      <origin xyz="0 0 0.007" rpy="1.5707963268 0 -1.5707963268"/>
+      <geometry>
+        <mesh filename="meshes/ur5e/visual/forearm.dae"/>
+      </geometry>
+    </visual>
+  </link>
+
+  <link name="wrist_1_link">
+    <visual>
+      <origin xyz="0 0 -0.127" rpy="1.5707963268 0 0"/>
+      <geometry>
+        <mesh filename="meshes/ur5e/visual/wrist1.dae"/>
+      </geometry>
+    </visual>
+  </link>
+
+  <link name="wrist_2_link">
+    <visual>
+      <origin xyz="0 0 -0.0997" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/ur5e/visual/wrist2.dae"/>
+      </geometry>
+    </visual>
+  </link>
+
+  <link name="wrist_3_link">
+    <visual>
+      <origin xyz="0 0 -0.0989" rpy="1.5707963268 0 0"/>
+      <geometry>
+        <mesh filename="meshes/ur5e/visual/wrist3.dae"/>
+      </geometry>
+    </visual>
+  </link>
+
+  <link name="tool0"/>
+
+  <!-- Joint definitions using official UR5e kinematics -->
+
+  <!-- Fixed joint from base_link to base_link_inertia -->
+  <joint name="base_link_inertia_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="base_link_inertia"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <!-- Joint 1: Shoulder pan -->
+  <joint name="shoulder_pan_joint" type="revolute">
+    <parent link="base_link"/>
+    <child link="shoulder_link"/>
+    <origin xyz="0 0 0.1625" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-6.2832" upper="6.2832" effort="150" velocity="3.14"/>
+  </joint>
+
+  <!-- Joint 2: Shoulder lift -->
+  <joint name="shoulder_lift_joint" type="revolute">
+    <parent link="shoulder_link"/>
+    <child link="upper_arm_link"/>
+    <origin xyz="0 0 0" rpy="1.5707963268 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-6.2832" upper="6.2832" effort="150" velocity="3.14"/>
+  </joint>
+
+  <!-- Joint 3: Elbow -->
+  <joint name="elbow_joint" type="revolute">
+    <parent link="upper_arm_link"/>
+    <child link="forearm_link"/>
+    <origin xyz="-0.425 0 0" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-3.1416" upper="3.1416" effort="150" velocity="3.14"/>
+  </joint>
+
+  <!-- Joint 4: Wrist 1 -->
+  <joint name="wrist_1_joint" type="revolute">
+    <parent link="forearm_link"/>
+    <child link="wrist_1_link"/>
+    <origin xyz="-0.3922 0 0.1333" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-6.2832" upper="6.2832" effort="28" velocity="3.14"/>
+  </joint>
+
+  <!-- Joint 5: Wrist 2 -->
+  <joint name="wrist_2_joint" type="revolute">
+    <parent link="wrist_1_link"/>
+    <child link="wrist_2_link"/>
+    <origin xyz="0 -0.0997 0" rpy="1.5707963268 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-6.2832" upper="6.2832" effort="28" velocity="3.14"/>
+  </joint>
+
+  <!-- Joint 6: Wrist 3 -->
+  <joint name="wrist_3_joint" type="revolute">
+    <parent link="wrist_2_link"/>
+    <child link="wrist_3_link"/>
+    <origin xyz="0 0.0996 0" rpy="1.5707963268 3.14159265359 3.14159265359"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-6.2832" upper="6.2832" effort="28" velocity="3.14"/>
+  </joint>
+
+  <!-- Tool flange -->
+  <joint name="tool0_joint" type="fixed">
+    <parent link="wrist_3_link"/>
+    <child link="tool0"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+
+</robot>

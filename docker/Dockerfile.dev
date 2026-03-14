@@ -1,0 +1,90 @@
+# Development container for UR Controller
+# Ubuntu 22.04 with C++ toolchain and all dependencies
+
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install build tools
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    cmake \
+    ninja-build \
+    git \
+    gdb \
+    valgrind \
+    clang \
+    clang-tidy \
+    clang-format \
+    cppcheck \
+    pkg-config \
+    wget \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install library dependencies
+RUN apt-get update && apt-get install -y \
+    libeigen3-dev \
+    libfcl-dev \
+    libyaml-cpp-dev \
+    libspdlog-dev \
+    libboost-system-dev \
+    libboost-thread-dev \
+    libboost-program-options-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install OpenGL/GUI dependencies for ImGui
+RUN apt-get update && apt-get install -y \
+    libglfw3-dev \
+    libglew-dev \
+    libglm-dev \
+    libgl1-mesa-dev \
+    libglu1-mesa-dev \
+    xorg-dev \
+    libassimp-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install ur_rtde from source (v1.5.8)
+RUN git clone --branch v1.5.8 --depth 1 https://gitlab.com/sdurobotics/ur_rtde.git /tmp/ur_rtde \
+    && cd /tmp/ur_rtde \
+    && mkdir build && cd build \
+    && cmake .. \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DPYTHON_BINDINGS=OFF \
+    && make -j$(nproc) \
+    && make install \
+    && ldconfig \
+    && rm -rf /tmp/ur_rtde
+
+# Install Ruckig from source (v0.9.2)
+RUN git clone --branch v0.9.2 --depth 1 https://github.com/pantor/ruckig.git /tmp/ruckig \
+    && cd /tmp/ruckig \
+    && mkdir build && cd build \
+    && cmake .. -DCMAKE_BUILD_TYPE=Release \
+    && make -j$(nproc) \
+    && make install \
+    && ldconfig \
+    && rm -rf /tmp/ruckig
+
+# Install Catch2 v3 from source
+RUN git clone --branch v3.5.2 --depth 1 https://github.com/catchorg/Catch2.git /tmp/catch2 \
+    && cd /tmp/catch2 \
+    && mkdir build && cd build \
+    && cmake .. -DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=Release \
+    && make -j$(nproc) \
+    && make install \
+    && ldconfig \
+    && rm -rf /tmp/catch2
+
+# Install CLI11
+RUN git clone --branch v2.3.2 --depth 1 https://github.com/CLIUtils/CLI11.git /tmp/cli11 \
+    && cd /tmp/cli11 \
+    && mkdir build && cd build \
+    && cmake .. -DCLI11_BUILD_TESTS=OFF -DCLI11_BUILD_EXAMPLES=OFF \
+    && make install \
+    && rm -rf /tmp/cli11
+
+WORKDIR /workspace
+
+# Default command
+CMD ["/bin/bash"]
