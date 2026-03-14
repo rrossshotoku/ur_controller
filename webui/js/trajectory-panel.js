@@ -210,14 +210,20 @@ export class TrajectoryPanel {
                     </span>
                 </div>
                 <div class="waypoint-controls">
-                    <input type="number" class="waypoint-input" placeholder="Blend"
-                           value="${wp.blend_radius}" step="0.01" min="0"
-                           title="Blend radius (m)"
-                           onchange="window.trajectoryPanel.updateWaypointParam(${index}, 'blend_radius', this.value)">
-                    <input type="number" class="waypoint-input" placeholder="Time"
-                           value="${wp.segment_time}" step="0.1" min="0"
-                           title="Segment time (s, 0=auto)"
-                           onchange="window.trajectoryPanel.updateWaypointParam(${index}, 'segment_time', this.value)">
+                    <div class="waypoint-param">
+                        <label>Blend (m)</label>
+                        <input type="number" class="waypoint-input"
+                               value="${wp.blend_radius}" step="0.01" min="0"
+                               title="Blend radius in meters (0 = stop at point)"
+                               onchange="window.trajectoryPanel.updateWaypointParam(${index}, 'blend_radius', this.value)">
+                    </div>
+                    <div class="waypoint-param">
+                        <label>Time (s)</label>
+                        <input type="number" class="waypoint-input"
+                               value="${wp.segment_time}" step="0.1" min="0"
+                               title="Time to reach this waypoint (0 = auto)"
+                               onchange="window.trajectoryPanel.updateWaypointParam(${index}, 'segment_time', this.value)">
+                    </div>
                     <button class="btn btn-small btn-danger"
                             onclick="window.trajectoryPanel.removeWaypoint(${index})">X</button>
                 </div>

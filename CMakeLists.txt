@@ -134,6 +134,7 @@ target_link_libraries(ur_trajectory PUBLIC
     ur_kinematics
     Eigen3::Eigen
     ruckig::ruckig
+    spdlog::spdlog
 )
 
 # Main library (will be populated as we add modules)

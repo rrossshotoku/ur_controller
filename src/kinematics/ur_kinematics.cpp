@@ -335,6 +335,95 @@ std::optional<JointVector> URKinematics::selectBestSolution(
 }
 
 // -----------------------------------------------------------------------------
+// Configuration Tracking
+// -----------------------------------------------------------------------------
+
+ArmConfiguration URKinematics::getConfiguration(const JointVector& q) const {
+    ArmConfiguration config;
+
+    // Wrap angles to [-π, π] for consistent analysis
+    JointVector qw = wrapAngles(q);
+
+    // Shoulder: front/back based on q1
+    // Front: q1 in roughly [-π/2, π/2] (robot reaching "forward")
+    // Back: q1 near ±π (robot reaching "backward")
+    // Use π/2 as the boundary
+    config.shoulder = (std::abs(qw[0]) < kPi / 2.0) ? 1 : -1;
+
+    // Elbow: up/down based on q3 sign
+    // In UR convention with the DH parameters used:
+    // - q3 < 0 typically means "elbow up" (forearm above shoulder-elbow line)
+    // - q3 > 0 typically means "elbow down"
+    config.elbow = (qw[2] < 0) ? 1 : -1;
+
+    // Wrist: based on q5
+    // The two q5 solutions come from ±sqrt(1 - cos²(q5))
+    // - Positive sin(q5) → q5 in (0, π)
+    // - Negative sin(q5) → q5 in (-π, 0)
+    config.wrist = (qw[4] >= 0) ? 1 : -1;
+
+    return config;
+}
+
+std::vector<JointVector> URKinematics::filterByConfiguration(
+    const std::vector<JointVector>& solutions,
+    const ArmConfiguration& target_config) const {
+
+    std::vector<JointVector> filtered;
+    filtered.reserve(solutions.size());
+
+    for (const auto& sol : solutions) {
+        if (getConfiguration(sol) == target_config) {
+            filtered.push_back(sol);
+        }
+    }
+
+    return filtered;
+}
+
+std::optional<JointVector> URKinematics::selectBestSolutionSameConfig(
+    const std::vector<JointVector>& solutions,
+    const JointVector& current_q) const {
+
+    // Get current configuration
+    ArmConfiguration current_config = getConfiguration(current_q);
+
+    // Filter to same configuration
+    std::vector<JointVector> same_config = filterByConfiguration(solutions, current_config);
+
+    if (same_config.empty()) {
+        return std::nullopt;  // No solution in same configuration
+    }
+
+    // Find closest solution (no need for large threshold since config is same)
+    std::optional<JointVector> best;
+    double best_distance = std::numeric_limits<double>::max();
+
+    for (const auto& sol : same_config) {
+        // Check joint limits
+        if (!limits_.withinLimits(sol)) {
+            continue;
+        }
+
+        // Calculate weighted distance (favor arm joints over wrist joints)
+        double distance = 0.0;
+        for (int i = 0; i < 6; ++i) {
+            double diff = wrapAngle(sol[i] - current_q[i]);
+            // Weight arm joints (0-2) more than wrist joints (3-5)
+            double weight = (i < 3) ? 2.0 : 1.0;
+            distance += weight * diff * diff;
+        }
+
+        if (distance < best_distance) {
+            best_distance = distance;
+            best = sol;
+        }
+    }
+
+    return best;
+}
+
+// -----------------------------------------------------------------------------
 // Jacobian
 // -----------------------------------------------------------------------------
 

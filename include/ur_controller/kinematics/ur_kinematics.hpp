@@ -18,6 +18,27 @@
 namespace ur_controller {
 namespace kinematics {
 
+/// @brief Discrete arm configuration (one of 8 possible)
+///
+/// UR robots have 3 binary configuration choices creating 8 discrete configurations.
+/// When planning trajectories, the robot should stay in the same configuration
+/// to avoid discontinuous joint jumps.
+struct ArmConfiguration {
+    int8_t shoulder{0};  ///< +1 = front (q1 near 0), -1 = back (q1 near ±π)
+    int8_t elbow{0};     ///< +1 = up (q3 < 0), -1 = down (q3 > 0)
+    int8_t wrist{0};     ///< +1 = up (q5 in [0,π]), -1 = down (q5 in [-π,0])
+
+    bool operator==(const ArmConfiguration& other) const {
+        return shoulder == other.shoulder &&
+               elbow == other.elbow &&
+               wrist == other.wrist;
+    }
+
+    bool operator!=(const ArmConfiguration& other) const {
+        return !(*this == other);
+    }
+};
+
 /// @brief Analytical kinematics engine for Universal Robots
 ///
 /// This class provides high-performance forward and inverse kinematics
@@ -98,6 +119,43 @@ public:
         const JointVector& current_q,
         const JointLimits& limits,
         double max_joint_jump = 0.5) const;
+
+    // -------------------------------------------------------------------------
+    // Configuration Tracking
+    // -------------------------------------------------------------------------
+
+    /// @brief Determine the arm configuration from joint angles
+    ///
+    /// Returns which of the 8 discrete configurations the robot is in.
+    /// This is based on:
+    /// - Shoulder (q1): front (near 0) or back (near ±π)
+    /// - Elbow (q3): up (negative) or down (positive)
+    /// - Wrist (q5): up (in [0,π]) or down (in [-π,0])
+    ///
+    /// @param q Joint angles
+    /// @return Configuration indices
+    [[nodiscard]] ArmConfiguration getConfiguration(const JointVector& q) const;
+
+    /// @brief Filter IK solutions to only those in the same configuration
+    ///
+    /// @param solutions All IK solutions
+    /// @param target_config Configuration to match
+    /// @return Solutions in the same configuration
+    [[nodiscard]] std::vector<JointVector> filterByConfiguration(
+        const std::vector<JointVector>& solutions,
+        const ArmConfiguration& target_config) const;
+
+    /// @brief Select best IK solution that maintains configuration
+    ///
+    /// Filters by configuration first, then selects closest to current.
+    /// Returns nullopt if no solution exists in the target configuration.
+    ///
+    /// @param solutions All IK solutions
+    /// @param current_q Current joint configuration
+    /// @return Best solution in same configuration, or nullopt
+    [[nodiscard]] std::optional<JointVector> selectBestSolutionSameConfig(
+        const std::vector<JointVector>& solutions,
+        const JointVector& current_q) const;
 
     // -------------------------------------------------------------------------
     // Jacobian and Singularities

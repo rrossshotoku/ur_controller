@@ -369,7 +369,20 @@ main {
 
 .waypoint-controls {
     display: flex;
-    gap: 5px;
+    gap: 8px;
+    align-items: center;
+}
+
+.waypoint-param {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.waypoint-param label {
+    font-size: 0.7rem;
+    color: var(--text-secondary);
+    text-align: center;
 }
 
 .waypoint-input {
