@@ -6,6 +6,7 @@
 #include <ruckig/ruckig.hpp>
 #include <spdlog/spdlog.h>
 #include <algorithm>
+#include <array>
 #include <cmath>
 
 namespace ur_controller {
@@ -37,68 +38,171 @@ double smoothStep(double t) {
     return t * t * (3.0 - 2.0 * t);
 }
 
-/// @brief Select the IK solution closest to reference joints (no threshold)
-/// This guarantees smooth motion by always selecting the closest solution,
-/// without arbitrary fallbacks to solutions[0] that could cause discontinuities.
-JointVector selectClosestSolution(const std::vector<JointVector>& solutions,
-                                   const JointVector& reference) {
+/// @brief Per-joint maximum allowed change for continuous motion (radians)
+/// J1, J2, J3, J5 are "configuration" joints - large changes indicate arm reconfiguration
+/// J4, J6 are "free spin" joints - can rotate freely to orient wrist/tool
+constexpr std::array<double, 6> kMaxJointChange = {
+    1.57,  // J1 (base): ~90° - large change means reaching around
+    1.57,  // J2 (shoulder): ~90° - large change affects overall arm pose
+    2.09,  // J3 (elbow): ~120° - elbow flip is ~180°
+    3.14,  // J4 (wrist 1): ~180° - free rotation, allow full spin
+    1.57,  // J5 (wrist 2): ~90° - wrist flip is ~180°
+    3.14   // J6 (flange): ~180° - free rotation, allow full spin
+};
+
+/// @brief Find an IK solution that can be reached with continuous joint motion
+/// @param solutions All IK solutions for the target pose
+/// @param previous Previous joint positions
+/// @return The closest solution within per-joint thresholds, or nullopt
+///
+/// This function uses per-joint thresholds to detect configuration changes.
+/// "Free spin" joints (J4, J6) allow large rotations for wrist/tool orientation.
+/// "Configuration" joints (J1, J2, J3, J5) have stricter limits to catch real flips.
+std::optional<JointVector> findContinuousSolution(
+    const std::vector<JointVector>& solutions,
+    const JointVector& previous) {
+
     if (solutions.empty()) {
-        return reference;  // Should never happen if caller checks
+        return std::nullopt;
     }
 
-    if (solutions.size() == 1) {
-        return solutions[0];
-    }
-
-    JointVector best = solutions[0];
-    double best_distance = std::numeric_limits<double>::max();
+    // Find the solution with minimum total joint motion that respects per-joint limits
+    std::optional<JointVector> best;
+    double best_total_dist = std::numeric_limits<double>::max();
 
     for (const auto& sol : solutions) {
-        // Compute weighted distance (wrist joints weighted less for stability)
-        double distance = 0.0;
-        for (int i = 0; i < 6; ++i) {
-            double diff = wrapAngle(sol[i] - reference[i]);
-            double weight = (i < 3) ? 1.0 : 0.5;  // Arm joints weighted more
-            distance += weight * diff * diff;
+        bool within_limits = true;
+        double total_dist = 0.0;
+
+        for (int j = 0; j < 6; ++j) {
+            double diff = std::abs(wrapAngle(sol[j] - previous[j]));
+            total_dist += diff * diff;
+
+            // Check against per-joint threshold
+            if (diff > kMaxJointChange[static_cast<size_t>(j)]) {
+                within_limits = false;
+                break;
+            }
         }
 
-        if (distance < best_distance) {
-            best_distance = distance;
-            best = sol;
+        // Only consider solutions within per-joint limits
+        if (within_limits) {
+            // Among valid solutions, prefer the one with smallest total motion
+            if (!best.has_value() || total_dist < best_total_dist) {
+                best = sol;
+                best_total_dist = total_dist;
+            }
         }
     }
 
     return best;
 }
 
-/// @brief Select the closest IK solution that matches the required configuration
-/// @param solutions All IK solutions
-/// @param reference Reference joints for distance calculation
-/// @param required_config The arm configuration that solutions must match
-/// @param kinematics Kinematics instance for configuration checking
-/// @return The closest matching solution, or nullopt if no solution in config
-std::optional<JointVector> selectClosestSolutionInConfig(
-    const std::vector<JointVector>& solutions,
-    const JointVector& reference,
-    const kinematics::ArmConfiguration& required_config,
-    const kinematics::URKinematics& kinematics) {
+/// @brief Check if a configuration is viable along a linear path between two poses
+/// @param start_pos Start position
+/// @param end_pos End position
+/// @param orientation Orientation to use (typically from start waypoint)
+/// @param config Configuration to test
+/// @param kinematics Kinematics instance
+/// @param num_samples Number of points to sample along path
+/// @return true if configuration is viable for entire path
+bool isConfigViableAlongPath(
+    const Eigen::Vector3d& start_pos,
+    const Eigen::Vector3d& end_pos,
+    const Eigen::Quaterniond& orientation,
+    const kinematics::ArmConfiguration& config,
+    const kinematics::URKinematics& kinematics,
+    int num_samples = 10) {
 
-    // Filter solutions to only those matching the required configuration
-    std::vector<JointVector> matching_solutions;
-    for (const auto& sol : solutions) {
-        if (kinematics.getConfiguration(sol) == required_config) {
-            matching_solutions.push_back(sol);
+    for (int i = 0; i <= num_samples; ++i) {
+        double t = static_cast<double>(i) / num_samples;
+        Eigen::Vector3d pos = start_pos + t * (end_pos - start_pos);
+
+        Eigen::Isometry3d pose = Eigen::Isometry3d::Identity();
+        pose.translation() = pos;
+        pose.linear() = orientation.toRotationMatrix();
+
+        auto solutions = kinematics.inverse(pose);
+        auto same_config = kinematics.filterByConfiguration(solutions, config);
+
+        if (same_config.empty()) {
+            return false;  // No solution in this configuration at this point
         }
     }
+    return true;
+}
 
-    if (matching_solutions.empty()) {
+/// @brief Find a configuration that is viable for the entire trajectory
+/// @param waypoints The waypoints to plan through
+/// @param kinematics Kinematics instance
+/// @return Pair of (viable_start_joints, viable_config), or nullopt if none found
+std::optional<std::pair<JointVector, kinematics::ArmConfiguration>> findViableConfiguration(
+    const std::vector<Waypoint>& waypoints,
+    const kinematics::URKinematics& kinematics) {
+
+    if (waypoints.empty()) {
         return std::nullopt;
     }
 
-    // Select closest from matching solutions
-    return selectClosestSolution(matching_solutions, reference);
-}
+    // Get all IK solutions for first waypoint
+    auto first_pose = waypoints[0].toPose();
+    auto first_solutions = kinematics.inverse(first_pose);
+    if (first_solutions.empty()) {
+        return std::nullopt;
+    }
 
+    // Get unique configurations from first waypoint solutions
+    std::vector<std::pair<kinematics::ArmConfiguration, JointVector>> configs_to_try;
+    for (const auto& sol : first_solutions) {
+        auto config = kinematics.getConfiguration(sol);
+        // Check if we already have this configuration
+        bool already_have = false;
+        for (const auto& [existing_config, _] : configs_to_try) {
+            if (existing_config == config) {
+                already_have = true;
+                break;
+            }
+        }
+        if (!already_have) {
+            configs_to_try.emplace_back(config, sol);
+        }
+    }
+
+    spdlog::info("Testing {} unique configurations for viability", configs_to_try.size());
+
+    // Test each configuration against all segments
+    for (const auto& [config, start_joints] : configs_to_try) {
+        bool config_viable = true;
+
+        // Check each segment
+        for (size_t i = 0; i + 1 < waypoints.size() && config_viable; ++i) {
+            const auto& wp_start = waypoints[i];
+            const auto& wp_end = waypoints[i + 1];
+
+            // Use the orientation from the starting waypoint for consistency
+            if (!isConfigViableAlongPath(
+                    wp_start.position,
+                    wp_end.position,
+                    wp_start.orientation,
+                    config,
+                    kinematics,
+                    10)) {
+                config_viable = false;
+                spdlog::debug("Config (s={} e={} w={}) fails on segment {}",
+                    config.shoulder, config.elbow, config.wrist, i);
+            }
+        }
+
+        if (config_viable) {
+            spdlog::info("Found viable configuration: shoulder={} elbow={} wrist={}",
+                config.shoulder, config.elbow, config.wrist);
+            return std::make_pair(start_joints, config);
+        }
+    }
+
+    spdlog::warn("No single configuration is viable for entire trajectory");
+    return std::nullopt;
+}
 
 }  // namespace
 
@@ -117,6 +221,95 @@ TrajectoryPlanner::TrajectoryPlanner(const kinematics::URKinematics& kinematics,
       config_(config),
       validator_(kinematics) {}
 
+// =============================================================================
+// IK Solving
+// =============================================================================
+
+std::optional<JointVector> TrajectoryPlanner::solveIK(
+    const Eigen::Isometry3d& pose,
+    const JointVector& seed) const {
+
+    if (config_.ik_method == IKMethod::Numerical) {
+        // Numerical IK using damped least squares
+        spdlog::info("solveIK: attempting numerical IK from seed J6={:.1f}°",
+            seed[5] * 180.0 / 3.14159);
+        auto result = kinematics_.inverseNumerical(pose, seed);
+        if (!result.has_value()) {
+            spdlog::warn("solveIK: numerical IK did not converge");
+        }
+        if (result.has_value()) {
+            // Verify with FK that the solution actually reaches the pose
+            auto fk_check = kinematics_.forward(*result);
+
+            // Check position error
+            double pos_error = (fk_check.translation() - pose.translation()).norm();
+            if (pos_error > 0.005) {  // 5mm tolerance
+                spdlog::warn("solveIK: numerical IK position error {:.4f}m > 5mm, rejecting", pos_error);
+                return std::nullopt;
+            }
+
+            // Check orientation error
+            Eigen::Quaterniond target_quat(pose.rotation());
+            Eigen::Quaterniond result_quat(fk_check.rotation());
+            double dot = std::abs(target_quat.dot(result_quat));
+            double orient_error = 2.0 * std::acos(std::min(dot, 1.0));  // Angle in radians
+            if (orient_error > 0.01) {  // ~0.6 degree tolerance
+                spdlog::warn("solveIK: numerical IK orientation error {:.2f}° > 0.6°, rejecting",
+                    orient_error * 180.0 / 3.14159);
+                return std::nullopt;
+            }
+            spdlog::info("solveIK: numerical IK succeeded, J6={:.1f}°",
+                (*result)[5] * 180.0 / 3.14159);
+
+            // Log joint changes for debugging
+            for (int i = 0; i < 6; ++i) {
+                double diff = kinematics::URKinematics::wrapAngle((*result)[i] - seed[i]);
+                if (std::abs(diff) > 0.35) {  // More than ~20 degrees
+                    spdlog::info("Numerical IK: J{} changed by {:.1f}° (seed={:.1f}°, result={:.1f}°)",
+                        i + 1, diff * 180.0 / 3.14159,
+                        seed[i] * 180.0 / 3.14159,
+                        (*result)[i] * 180.0 / 3.14159);
+                }
+            }
+        }
+        return result;
+    } else {
+        // Analytical IK with continuous solution selection
+        auto solutions = kinematics_.inverse(pose);
+
+        if (solutions.empty()) {
+            return std::nullopt;
+        }
+
+        // Filter out numerically corrupt solutions using FK verification
+        constexpr double kMaxFKError = 0.005;  // 5mm tolerance
+        Eigen::Vector3d target_pos = pose.translation();
+
+        std::vector<JointVector> valid_solutions;
+        valid_solutions.reserve(solutions.size());
+
+        for (const auto& sol : solutions) {
+            auto fk_check = kinematics_.forward(sol);
+            double pos_error = (fk_check.translation() - target_pos).norm();
+            if (pos_error <= kMaxFKError) {
+                valid_solutions.push_back(sol);
+            }
+        }
+
+        if (valid_solutions.empty()) {
+            spdlog::warn("All analytical IK solutions failed FK verification");
+            return std::nullopt;
+        }
+
+        // Find continuous solution within per-joint thresholds
+        return findContinuousSolution(valid_solutions, seed);
+    }
+}
+
+// =============================================================================
+// Planning
+// =============================================================================
+
 PlannedTrajectory TrajectoryPlanner::plan(const std::vector<Waypoint>& waypoints) {
     // Use IK for first waypoint to get start configuration
     if (waypoints.empty()) {
@@ -126,23 +319,56 @@ PlannedTrajectory TrajectoryPlanner::plan(const std::vector<Waypoint>& waypoints
         return result;
     }
 
-    // Get IK solution for first waypoint
-    auto pose = waypoints[0].toPose();
-    auto solutions = kinematics_.inverse(pose);
-    if (solutions.empty()) {
+    // Find a configuration that is viable for the entire trajectory
+    auto viable = findViableConfiguration(waypoints, kinematics_);
+    if (!viable.has_value()) {
+        // Fall back to checking just the first waypoint
+        auto pose = waypoints[0].toPose();
+        auto solutions = kinematics_.inverse(pose);
+        if (solutions.empty()) {
+            PlannedTrajectory result;
+            result.valid = false;
+            result.messages.push_back({ValidationSeverity::Error, "First waypoint is unreachable", 0, std::nullopt});
+            return result;
+        }
+
+        // No viable configuration for entire trajectory
         PlannedTrajectory result;
         result.valid = false;
-        result.messages.push_back({ValidationSeverity::Error, "First waypoint is unreachable", 0, std::nullopt});
+        result.messages.push_back({ValidationSeverity::Error,
+            "No arm configuration is viable for the entire trajectory. "
+            "The path crosses configuration boundaries that cannot be avoided. "
+            "Try repositioning waypoints to stay within one arm configuration.",
+            std::nullopt, std::nullopt});
         return result;
     }
 
-    // Select solution within limits
-    JointVector start_joints = solutions[0];
+    auto [start_joints, viable_config] = *viable;
+
+    // Verify start joints are within limits
     const auto& limits = kinematics_.jointLimits();
-    for (const auto& sol : solutions) {
-        if (limits.withinLimits(sol)) {
-            start_joints = sol;
-            break;
+    if (!limits.withinLimits(start_joints)) {
+        // Try to find another solution in the same config that's within limits
+        auto pose = waypoints[0].toPose();
+        auto solutions = kinematics_.inverse(pose);
+        auto same_config_sols = kinematics_.filterByConfiguration(solutions, viable_config);
+
+        bool found_valid = false;
+        for (const auto& sol : same_config_sols) {
+            if (limits.withinLimits(sol)) {
+                start_joints = sol;
+                found_valid = true;
+                break;
+            }
+        }
+
+        if (!found_valid) {
+            PlannedTrajectory result;
+            result.valid = false;
+            result.messages.push_back({ValidationSeverity::Error,
+                "Viable configuration exists but all solutions exceed joint limits",
+                0, std::nullopt});
+            return result;
         }
     }
 
@@ -326,15 +552,27 @@ std::vector<TrajectorySample> TrajectoryPlanner::planJointMotion(
 
         // Determine actual start and end positions
         // If coming from a blend, start from blend arc end instead of waypoint
-        JointVector actual_start = coming_from_blend ? blend_end_joints : seg.start_joints;
+        // Use actual joints from previous segment, not pre-computed start_joints
+        JointVector actual_start = coming_from_blend ? blend_end_joints : current_pos;
 
-        // Check if this segment has a blend arc at the end
-        bool has_blend_arc = seg.blend_arc.has_value() &&
-                             (seg_idx + 1 < segments.size()) &&
-                             waypoints[seg.end_index].pause_time <= 0.0;
+        // Check if this segment needs a blend arc at the end
+        // Compute blend geometry on-the-fly using actual current joints
+        bool needs_blend = (waypoints[seg.end_index].blend_radius > 0.0) &&
+                           (seg_idx + 1 < segments.size()) &&
+                           (waypoints[seg.end_index].pause_time <= 0.0);
 
-        if (has_blend_arc) {
-            const auto& arc = *seg.blend_arc;
+        std::optional<BlendArcInfo> blend_arc;
+        if (needs_blend) {
+            // Compute blend geometry using actual current joints
+            blend_arc = computeBlendGeometry(
+                waypoints[seg.start_index],
+                waypoints[seg.end_index],
+                waypoints[seg.end_index + 1],
+                actual_start);
+        }
+
+        if (blend_arc.has_value()) {
+            const auto& arc = *blend_arc;
 
             // Plan segment 1: linear portion + first half of arc (unified, evenly spaced)
             Eigen::Isometry3d start_pose = kinematics_.forward(actual_start);
@@ -382,8 +620,12 @@ std::vector<TrajectorySample> TrajectoryPlanner::planJointMotion(
 
         } else {
             // No blend arc at end - plan to the waypoint
-            JointVector actual_end = seg.end_joints;
-            Eigen::Isometry3d end_pose = kinematics_.forward(actual_end);
+            // Get end pose from waypoint directly (NOT from pre-computed joints)
+            Eigen::Isometry3d end_pose = waypoints[seg.end_index].toPose();
+            Eigen::Vector3d end_pos = end_pose.translation();
+
+            spdlog::info("Segment {}: target pos=[{:.4f}, {:.4f}, {:.4f}]",
+                seg_idx, end_pos.x(), end_pos.y(), end_pos.z());
 
             if (coming_from_blend && prev_blend_arc.has_value()) {
                 // Coming from a blend: plan second half of arc + linear to waypoint
@@ -394,7 +636,7 @@ std::vector<TrajectorySample> TrajectoryPlanner::planJointMotion(
                 if (segment_duration <= 0.0) {
                     // Auto-calculate
                     double half_arc_length = arc.arc_length / 2.0;
-                    double linear_distance = (end_pose.translation() - arc.arc_end).norm();
+                    double linear_distance = (end_pos - arc.arc_end).norm();
                     segment_duration = (half_arc_length + linear_distance) / config_.max_linear_velocity;
                     segment_duration = std::max(segment_duration, 0.1);
                 }
@@ -423,7 +665,7 @@ std::vector<TrajectorySample> TrajectoryPlanner::planJointMotion(
                 }
 
                 current_time = segment_samples.back().time + 1.0 / config_.sample_rate;
-                current_pos = actual_end;
+                current_pos = segment_samples.back().joints;  // Use actual computed joints
                 current_vel = JointVector::Zero();
                 current_acc = JointVector::Zero();
 
@@ -434,7 +676,7 @@ std::vector<TrajectorySample> TrajectoryPlanner::planJointMotion(
 
                 double segment_duration = seg.duration;
                 if (segment_duration <= 0.0) {
-                    double linear_distance = (end_pose.translation() - start_pose.translation()).norm();
+                    double linear_distance = (end_pos - start_pose.translation()).norm();
                     segment_duration = linear_distance / config_.max_linear_velocity;
                     segment_duration = std::max(segment_duration, 0.1);
                 }
@@ -457,7 +699,7 @@ std::vector<TrajectorySample> TrajectoryPlanner::planJointMotion(
                 }
 
                 current_time = segment_samples.back().time + 1.0 / config_.sample_rate;
-                current_pos = actual_end;
+                current_pos = segment_samples.back().joints;  // Use actual computed joints
                 current_vel = JointVector::Zero();
                 current_acc = JointVector::Zero();
             }
@@ -615,29 +857,11 @@ std::vector<TrajectorySample> TrajectoryPlanner::planSegmentLinearCartesian(
         duration = 1.0;  // Default to 1 second if not specified
     }
 
-    // Determine the starting arm configuration - all samples must stay in this config
-    kinematics::ArmConfiguration required_config = kinematics_.getConfiguration(start_joints);
-
-    // Verify end pose is reachable in the SAME configuration
-    auto end_solutions = kinematics_.inverse(end_pose);
-    if (end_solutions.empty()) {
-        spdlog::error("Linear path end point unreachable - no IK solution for end pose");
-        return {};
-    }
-
-    // Check if end pose has solution in same configuration
-    auto end_in_config = selectClosestSolutionInConfig(end_solutions, start_joints, required_config, kinematics_);
-    if (!end_in_config.has_value()) {
-        Eigen::Vector3d end_pos = end_pose.translation();
-        spdlog::error("Linear path requires configuration change - end pose [{:.3f}, {:.3f}, {:.3f}] "
-            "has no IK solution in starting configuration (shoulder={}, elbow={}, wrist={}). "
-            "Adjust waypoints to stay within one arm configuration.",
-            end_pos.x(), end_pos.y(), end_pos.z(),
-            static_cast<int>(required_config.shoulder),
-            static_cast<int>(required_config.elbow),
-            static_cast<int>(required_config.wrist));
-        return {};
-    }
+    // Log the segment planning
+    Eigen::Vector3d dbg_end_pos = end_pose.translation();
+    spdlog::info("planSegmentLinearCartesian: start J6={:.1f}°, end_pos=[{:.4f}, {:.4f}, {:.4f}]",
+        start_joints[5] * 180.0 / M_PI,
+        dbg_end_pos.x(), dbg_end_pos.y(), dbg_end_pos.z());
 
     // Extract positions
     Eigen::Vector3d start_pos = start_pose.translation();
@@ -653,94 +877,17 @@ std::vector<TrajectorySample> TrajectoryPlanner::planSegmentLinearCartesian(
         end_quat.coeffs() = -end_quat.coeffs();
     }
 
-    // =========================================================================
-    // PASS 1: Preview path to find maximum condition number (singularity check)
-    // =========================================================================
-    constexpr int kPreviewSamples = 50;
-    double max_condition_number = 1.0;
-    JointVector preview_joints = start_joints;
-
-    for (int i = 0; i < kPreviewSamples; ++i) {
-        double t = static_cast<double>(i) / (kPreviewSamples - 1);
-        double s = constant_velocity ? t : smoothStep(t);
-
-        // Interpolate position and orientation
-        Eigen::Vector3d pos = start_pos + s * pos_diff;
-        Eigen::Quaterniond quat = start_quat.slerp(s, end_quat);
-
-        // Create pose and solve IK
-        Eigen::Isometry3d preview_pose = Eigen::Isometry3d::Identity();
-        preview_pose.translation() = pos;
-        preview_pose.linear() = quat.toRotationMatrix();
-
-        auto solutions = kinematics_.inverse(preview_pose);
-        if (solutions.empty()) {
-            spdlog::error("Linear path unreachable at preview t={:.3f}, pos=[{:.3f}, {:.3f}, {:.3f}] - "
-                "no IK solution for requested orientation",
-                t, pos.x(), pos.y(), pos.z());
-            return {};  // Path is unreachable
-        }
-
-        // Select solution in same configuration
-        auto config_solution = selectClosestSolutionInConfig(solutions, preview_joints, required_config, kinematics_);
-        if (!config_solution.has_value()) {
-            spdlog::error("Linear path requires configuration change at position [{:.3f}, {:.3f}, {:.3f}] "
-                "(t={:.1f}%). No IK solution exists in starting configuration (shoulder={}, elbow={}, wrist={}). "
-                "Adjust waypoints to avoid crossing configuration boundaries.",
-                pos.x(), pos.y(), pos.z(), t * 100.0,
-                static_cast<int>(required_config.shoulder),
-                static_cast<int>(required_config.elbow),
-                static_cast<int>(required_config.wrist));
-            return {};
-        }
-        preview_joints = *config_solution;
-
-        // Analyze singularity at this configuration
-        auto singularity_info = kinematics_.analyzeSingularity(preview_joints);
-        max_condition_number = std::max(max_condition_number, singularity_info.condition_number);
-    }
-
-    // =========================================================================
-    // PASS 2: Compute time scaling factor to keep joint velocities within limits
-    // =========================================================================
-    double path_length = pos_diff.norm();
-    double nominal_tcp_velocity = path_length / duration;
-
-    // Required: joint_velocity ≈ condition_number × tcp_velocity <= max_joint_velocity
-    double max_allowed_tcp_velocity = config_.max_joint_velocity / max_condition_number;
-
-    double time_scale = 1.0;
-    if (nominal_tcp_velocity > max_allowed_tcp_velocity && max_allowed_tcp_velocity > 0.0) {
-        time_scale = nominal_tcp_velocity / max_allowed_tcp_velocity;
-
-        // Cap the time scale to avoid extremely long trajectories
-        constexpr double kMaxTimeScale = 100.0;
-        if (time_scale > kMaxTimeScale) {
-            spdlog::warn("Trajectory would need {:.0f}x slowdown due to singularity (condition={:.0f}). "
-                "Capping at {:.0f}x - path may have velocity limit violations.",
-                time_scale, max_condition_number, kMaxTimeScale);
-            time_scale = kMaxTimeScale;
-        } else {
-            spdlog::info("Scaling segment duration by {:.1f}x for singularity (condition number={:.0f})",
-                time_scale, max_condition_number);
-        }
-    }
-
-    double scaled_duration = duration * time_scale;
-
-    // =========================================================================
-    // PASS 3: Generate samples with scaled duration
-    // =========================================================================
+    // Generate samples
     double sample_period = 1.0 / config_.sample_rate;
-    int num_samples = static_cast<int>(scaled_duration * config_.sample_rate) + 1;
+    int num_samples = static_cast<int>(duration * config_.sample_rate) + 1;
     if (num_samples < 2) num_samples = 2;
 
-    // Track previous joints for smooth IK selection
+    // Track previous joints - angles accumulate naturally
     JointVector prev_joints = start_joints;
 
     for (int i = 0; i < num_samples; ++i) {
         double t = static_cast<double>(i) / (num_samples - 1);
-        double sample_time = start_time + t * scaled_duration;
+        double sample_time = start_time + t * duration;
 
         // Choose velocity profile:
         // - constant_velocity=true: linear interpolation (for blending into arcs)
@@ -758,25 +905,51 @@ std::vector<TrajectorySample> TrajectoryPlanner::planSegmentLinearCartesian(
         pose.translation() = pos;
         pose.linear() = quat.toRotationMatrix();
 
-        // Solve IK - no orientation adjustment (user requested strict orientation)
-        auto solutions = kinematics_.inverse(pose);
+        // Solve IK and select solution closest to previous sample
+        JointVector joints;
+        if (config_.ik_method == IKMethod::Numerical) {
+            // Numerical IK seeds from previous joints
+            auto ik_solution = kinematics_.inverseNumerical(pose, prev_joints);
+            if (!ik_solution.has_value()) {
+                spdlog::error("Linear path unreachable at t={:.3f}, pos=[{:.3f}, {:.3f}, {:.3f}] - "
+                    "numerical IK failed",
+                    t, pos.x(), pos.y(), pos.z());
+                return {};
+            }
+            joints = *ik_solution;
+        } else {
+            // Analytical IK: get all solutions and pick closest to previous
+            auto solutions = kinematics_.inverse(pose);
+            if (solutions.empty()) {
+                spdlog::error("Linear path unreachable at t={:.3f}, pos=[{:.3f}, {:.3f}, {:.3f}] - "
+                    "no IK solution found",
+                    t, pos.x(), pos.y(), pos.z());
+                return {};
+            }
 
-        if (solutions.empty()) {
-            spdlog::error("Linear path unreachable at t={:.3f}, pos=[{:.3f}, {:.3f}, {:.3f}] - "
-                "no IK solution for requested orientation",
-                t, pos.x(), pos.y(), pos.z());
-            return {};
+            // Select solution closest to previous sample (continuous motion)
+            auto best = kinematics_.selectBestSolution(solutions, prev_joints, 1.0);
+            joints = best.value_or(solutions[0]);
         }
 
-        // Select IK solution in same configuration as start
-        auto config_solution = selectClosestSolutionInConfig(solutions, prev_joints, required_config, kinematics_);
-        if (!config_solution.has_value()) {
-            // This should not happen since Pass 1 verified the path, but handle it anyway
-            spdlog::error("Linear path requires configuration change at position [{:.3f}, {:.3f}, {:.3f}]",
-                pos.x(), pos.y(), pos.z());
-            return {};
+        // Unwrap IK solution to match previous joints (angles accumulate, no wrapping)
+        for (int j = 0; j < 6; ++j) {
+            double diff = joints[j] - prev_joints[j];
+            while (diff > M_PI) {
+                joints[j] -= 2.0 * M_PI;
+                diff -= 2.0 * M_PI;
+            }
+            while (diff < -M_PI) {
+                joints[j] += 2.0 * M_PI;
+                diff += 2.0 * M_PI;
+            }
         }
-        JointVector joints = *config_solution;
+
+        // Log J6 at first and last sample
+        if (i == 0 || i == num_samples - 1) {
+            spdlog::info("  Sample {} (t={:.2f}): J6={:.1f}°",
+                i, t, joints[5] * 180.0 / M_PI);
+        }
 
         // Check for singularity (large joint velocity indicates singularity proximity)
         if (i > 0 && !samples.empty()) {
@@ -805,7 +978,7 @@ std::vector<TrajectorySample> TrajectoryPlanner::planSegmentLinearCartesian(
         }
 
         samples.push_back(createSample(sample_time, joints, velocities));
-        prev_joints = joints;  // Track for next iteration
+        prev_joints = joints;  // Track for continuity checking
     }
 
     return samples;
@@ -864,34 +1037,6 @@ std::vector<TrajectorySample> TrajectoryPlanner::planSegmentWithHalfArc(
     }
 
     double total_distance = linear_distance + half_arc_length;
-
-    // Determine the starting arm configuration - all samples must stay in this config
-    kinematics::ArmConfiguration required_config = kinematics_.getConfiguration(start_joints);
-
-    // Solve IK for segment end pose
-    auto end_solutions = kinematics_.inverse(segment_end_pose);
-    if (end_solutions.empty()) {
-        spdlog::error("Blend segment end point unreachable - no IK solution");
-        return {};
-    }
-
-    // Select best IK solution for endpoint IN SAME CONFIGURATION
-    auto best_end = selectClosestSolutionInConfig(end_solutions, start_joints, required_config, kinematics_);
-    if (!best_end.has_value()) {
-        Eigen::Vector3d end_pos = segment_end_pose.translation();
-        spdlog::error("Blend segment requires configuration change - end pose [{:.3f}, {:.3f}, {:.3f}] "
-            "has no IK solution in starting configuration (shoulder={}, elbow={}, wrist={}). "
-            "Adjust waypoints to stay within one arm configuration.",
-            end_pos.x(), end_pos.y(), end_pos.z(),
-            static_cast<int>(required_config.shoulder),
-            static_cast<int>(required_config.elbow),
-            static_cast<int>(required_config.wrist));
-        return {};
-    }
-    JointVector end_joints = *best_end;
-
-    // Compute joint differences for expected trajectory interpolation
-    JointVector joint_diff = jointDifference(end_joints, start_joints);
 
     // Ensure shortest path for SLERP
     if (linear_start_quat.dot(linear_end_quat) < 0.0) {
@@ -955,21 +1100,17 @@ std::vector<TrajectorySample> TrajectoryPlanner::planSegmentWithHalfArc(
         Eigen::Isometry3d preview_pose = Eigen::Isometry3d::Identity();
         preview_pose.translation() = pos;
         preview_pose.linear() = quat.toRotationMatrix();
-        auto solutions = kinematics_.inverse(preview_pose);
 
-        if (!solutions.empty()) {
-            auto config_solution = selectClosestSolutionInConfig(solutions, preview_joints, required_config, kinematics_);
-            if (!config_solution.has_value()) {
-                spdlog::error("Blend path requires configuration change at position [{:.3f}, {:.3f}, {:.3f}] "
-                    "(t={:.1f}%). No IK solution exists in starting configuration. "
-                    "Adjust waypoints to avoid crossing configuration boundaries.",
-                    pos.x(), pos.y(), pos.z(), static_cast<double>(i) / (kPreviewSamples - 1) * 100.0);
-                return {};
-            }
-            preview_joints = *config_solution;
-            auto singularity_info = kinematics_.analyzeSingularity(preview_joints);
-            max_condition_number = std::max(max_condition_number, singularity_info.condition_number);
+        auto ik_solution = solveIK(preview_pose, preview_joints);
+        if (!ik_solution.has_value()) {
+            spdlog::error("Blend path unreachable at position [{:.3f}, {:.3f}, {:.3f}] "
+                "(t={:.1f}%). No IK solution found.",
+                pos.x(), pos.y(), pos.z(), static_cast<double>(i) / (kPreviewSamples - 1) * 100.0);
+            return {};
         }
+        preview_joints = *ik_solution;
+        auto singularity_info = kinematics_.analyzeSingularity(preview_joints);
+        max_condition_number = std::max(max_condition_number, singularity_info.condition_number);
     }
 
     // Compute time scaling
@@ -992,16 +1133,12 @@ std::vector<TrajectorySample> TrajectoryPlanner::planSegmentWithHalfArc(
     int num_samples = static_cast<int>(scaled_duration * config_.sample_rate) + 1;
     if (num_samples < 2) num_samples = 2;
 
+    // Track previous joints - angles accumulate naturally
+    JointVector prev_joints = start_joints;
+
     for (int i = 0; i < num_samples; ++i) {
         double t = static_cast<double>(i) / (num_samples - 1);
         double sample_time = start_time + t * scaled_duration;
-
-        // Compute expected joints via linear interpolation
-        JointVector expected_joints;
-        for (size_t j = 0; j < 6; ++j) {
-            auto idx = static_cast<Eigen::Index>(j);
-            expected_joints[idx] = start_joints[idx] + t * joint_diff[idx];
-        }
 
         // Distance along the combined path
         double dist_along_path = t * total_distance;
@@ -1059,28 +1196,33 @@ std::vector<TrajectorySample> TrajectoryPlanner::planSegmentWithHalfArc(
             }
         }
 
-        // Solve IK - no orientation adjustment
+        // Solve IK using configured method
         Eigen::Isometry3d sample_pose = Eigen::Isometry3d::Identity();
         sample_pose.translation() = pos;
         sample_pose.linear() = quat.toRotationMatrix();
-        auto solutions = kinematics_.inverse(sample_pose);
 
-        if (solutions.empty()) {
+        // Use prev_joints as seed for continuous motion
+        auto ik_solution = solveIK(sample_pose, prev_joints);
+        if (!ik_solution.has_value()) {
             spdlog::error("Blend path unreachable at t={:.3f}, pos=[{:.3f}, {:.3f}, {:.3f}] - "
-                "no IK solution for requested orientation",
+                "no IK solution found",
                 t, pos.x(), pos.y(), pos.z());
             return {};
         }
+        JointVector joints = *ik_solution;
 
-        // Select IK solution in same configuration
-        auto config_solution = selectClosestSolutionInConfig(solutions, expected_joints, required_config, kinematics_);
-        if (!config_solution.has_value()) {
-            // This should not happen since preview verified the path
-            spdlog::error("Blend path requires configuration change at position [{:.3f}, {:.3f}, {:.3f}]",
-                pos.x(), pos.y(), pos.z());
-            return {};
+        // Unwrap IK solution to match previous joints (angles accumulate, no wrapping)
+        for (int j = 0; j < 6; ++j) {
+            double diff = joints[j] - prev_joints[j];
+            while (diff > M_PI) {
+                joints[j] -= 2.0 * M_PI;
+                diff -= 2.0 * M_PI;
+            }
+            while (diff < -M_PI) {
+                joints[j] += 2.0 * M_PI;
+                diff += 2.0 * M_PI;
+            }
         }
-        JointVector joints = *config_solution;
 
         // Compute velocities
         JointVector velocities = JointVector::Zero();
@@ -1092,6 +1234,7 @@ std::vector<TrajectorySample> TrajectoryPlanner::planSegmentWithHalfArc(
         }
 
         samples.push_back(createSample(sample_time, joints, velocities));
+        prev_joints = joints;  // Track for next iteration
     }
 
     return samples;
@@ -1331,27 +1474,20 @@ std::optional<BlendArcInfo> TrajectoryPlanner::computeBlendGeometry(
     end_pose.translation() = arc_end;
     end_pose.linear() = blend_wp.toPose().rotation();
 
-    // Solve IK for arc endpoints
-    auto start_solutions = kinematics_.inverse(start_pose);
-    auto end_solutions = kinematics_.inverse(end_pose);
-
-    spdlog::info("  IK solutions: start={}, end={}", start_solutions.size(), end_solutions.size());
-
-    if (start_solutions.empty() || end_solutions.empty()) {
-        spdlog::warn("  Arc endpoints not reachable, skipping blend");
-        return std::nullopt;  // Arc endpoints not reachable
-    }
-
-    // Select best solutions based on continuity from prev_joints
-    auto best_start = kinematics_.selectBestSolution(start_solutions, prev_joints, 1.0);
+    // Solve IK for arc endpoints using configured method
+    auto best_start = solveIK(start_pose, prev_joints);
     if (!best_start) {
-        best_start = start_solutions[0];
+        spdlog::warn("  Arc start not reachable - no IK solution");
+        return std::nullopt;
     }
 
-    auto best_end = kinematics_.selectBestSolution(end_solutions, *best_start, 1.0);
+    auto best_end = solveIK(end_pose, *best_start);
     if (!best_end) {
-        best_end = end_solutions[0];
+        spdlog::warn("  Arc end not reachable - no IK solution");
+        return std::nullopt;
     }
+    spdlog::info("  Arc IK solved using {} method",
+        config_.ik_method == IKMethod::Numerical ? "numerical" : "analytical");
 
     // Build BlendArcInfo
     BlendArcInfo arc_info;
@@ -1383,9 +1519,6 @@ std::vector<TrajectorySample> TrajectoryPlanner::planBlendArcCartesian(
     // Use the provided arc_duration (calculated by caller for timing consistency)
     arc_duration = std::max(arc_duration, 0.05);  // Minimum 50ms
 
-    // Determine the starting arm configuration - all samples must stay in this config
-    kinematics::ArmConfiguration required_config = kinematics_.getConfiguration(arc_info.start_joints);
-
     // Compute vector from center to arc start
     Eigen::Vector3d v_start = arc_info.arc_start - arc_info.center;
 
@@ -1412,21 +1545,16 @@ std::vector<TrajectorySample> TrajectoryPlanner::planBlendArcCartesian(
         preview_pose.translation() = arc_point;
         preview_pose.linear() = orientation.toRotationMatrix();
 
-        auto solutions = kinematics_.inverse(preview_pose);
-        if (!solutions.empty()) {
-            auto config_solution = selectClosestSolutionInConfig(solutions, preview_joints, required_config, kinematics_);
-            if (!config_solution.has_value()) {
-                Eigen::Vector3d arc_point = arc_info.center + v_rotated;
-                spdlog::error("Blend arc requires configuration change at position [{:.3f}, {:.3f}, {:.3f}] "
-                    "(t={:.1f}%). No IK solution exists in starting configuration. "
-                    "Adjust waypoints to avoid crossing configuration boundaries.",
-                    arc_point.x(), arc_point.y(), arc_point.z(), t * 100.0);
-                return {};
-            }
-            preview_joints = *config_solution;
-            auto singularity_info = kinematics_.analyzeSingularity(preview_joints);
-            max_condition_number = std::max(max_condition_number, singularity_info.condition_number);
+        auto ik_solution = solveIK(preview_pose, preview_joints);
+        if (!ik_solution.has_value()) {
+            spdlog::error("Blend arc unreachable at position [{:.3f}, {:.3f}, {:.3f}] "
+                "(t={:.1f}%). No IK solution found.",
+                arc_point.x(), arc_point.y(), arc_point.z(), t * 100.0);
+            return {};
         }
+        preview_joints = *ik_solution;
+        auto singularity_info = kinematics_.analyzeSingularity(preview_joints);
+        max_condition_number = std::max(max_condition_number, singularity_info.condition_number);
     }
 
     // Compute time scaling
@@ -1466,29 +1594,18 @@ std::vector<TrajectorySample> TrajectoryPlanner::planBlendArcCartesian(
         Eigen::Quaterniond orientation = arc_info.start_orientation.slerp(
             t, arc_info.end_orientation);
 
-        // Solve IK - no orientation adjustment
+        // Solve IK using configured method
         JointVector prev_joints_val = (i == 0) ? arc_info.start_joints : samples.back().joints;
         Eigen::Isometry3d arc_pose = Eigen::Isometry3d::Identity();
         arc_pose.translation() = arc_point;
         arc_pose.linear() = orientation.toRotationMatrix();
-        auto solutions = kinematics_.inverse(arc_pose);
-        JointVector joints;
 
-        if (solutions.empty()) {
-            // IK failed - arc position unreachable
-            spdlog::error("Arc path unreachable at t={:.3f} - no IK solution for requested orientation", t);
-            return {};  // Empty samples signals failure
-        }
-
-        // Select IK solution in same configuration
-        auto config_solution = selectClosestSolutionInConfig(solutions, prev_joints_val, required_config, kinematics_);
-        if (!config_solution.has_value()) {
-            // This should not happen since preview verified the path
-            spdlog::error("Blend arc requires configuration change at position [{:.3f}, {:.3f}, {:.3f}]",
-                arc_point.x(), arc_point.y(), arc_point.z());
+        auto ik_solution = solveIK(arc_pose, prev_joints_val);
+        if (!ik_solution.has_value()) {
+            spdlog::error("Arc path unreachable at t={:.3f} - no IK solution found", t);
             return {};
         }
-        joints = *config_solution;
+        JointVector joints = *ik_solution;
 
         // Compute velocity (finite difference)
         JointVector velocities = JointVector::Zero();
@@ -1641,6 +1758,333 @@ TrajectoryVisualization TrajectoryPlanner::generateVisualization(
     }
 
     return viz;
+}
+
+// =============================================================================
+// New API: SetupPose and Sequence planning
+// =============================================================================
+
+PlannedTrajectory TrajectoryPlanner::planSetupPose(
+    const SetupPose& setup_pose,
+    const JointVector& start_joints) {
+
+    PlannedTrajectory result;
+    result.sample_period = 1.0 / config_.sample_rate;
+
+    // Validate target joints are within limits
+    const auto& limits = kinematics_.jointLimits();
+    if (!limits.withinLimits(setup_pose.joints)) {
+        result.valid = false;
+        result.messages.push_back({ValidationSeverity::Error,
+            "Setup pose joints exceed joint limits", std::nullopt, std::nullopt});
+        return result;
+    }
+
+    // Check if we're already at the target
+    double total_diff = 0.0;
+    for (int i = 0; i < 6; ++i) {
+        double diff = std::abs(setup_pose.joints[i] - start_joints[i]);
+        total_diff += diff;
+    }
+    if (total_diff < 1e-6) {
+        // Already at target - create single sample
+        result.valid = true;
+        result.total_duration = 0.0;
+        result.samples.push_back(createSample(0.0, start_joints, JointVector::Zero()));
+        return result;
+    }
+
+    // Determine duration
+    double duration = setup_pose.move_time;
+    if (duration <= 0.0) {
+        // Auto-compute based on joint velocity limits
+        duration = calculateSegmentDuration(start_joints, setup_pose.joints);
+    }
+
+    // Plan using Ruckig for smooth joint-space motion
+    result.samples = planSegmentWithRuckig(
+        start_joints,
+        setup_pose.joints,
+        JointVector::Zero(),  // Start at rest
+        JointVector::Zero(),  // No initial acceleration
+        0.0,                  // Start time
+        duration,
+        JointVector::Zero()); // End at rest
+
+    if (result.samples.empty()) {
+        result.valid = false;
+        result.messages.push_back({ValidationSeverity::Error,
+            "Failed to plan joint motion to setup pose", std::nullopt, std::nullopt});
+        return result;
+    }
+
+    result.total_duration = result.samples.back().time;
+    result.valid = true;
+
+    if (!setup_pose.name.empty()) {
+        result.messages.push_back({ValidationSeverity::Info,
+            "Setup pose '" + setup_pose.name + "' planned: " +
+            std::to_string(result.total_duration) + "s",
+            std::nullopt, std::nullopt});
+    }
+
+    return result;
+}
+
+PlannedTrajectory TrajectoryPlanner::planSequence(
+    const Sequence& sequence,
+    const JointVector& entry_joints) {
+
+    PlannedTrajectory result;
+    result.sample_period = 1.0 / config_.sample_rate;
+
+    if (sequence.empty()) {
+        result.valid = false;
+        result.messages.push_back({ValidationSeverity::Error,
+            "Sequence contains no waypoints", std::nullopt, std::nullopt});
+        return result;
+    }
+
+    // Log entry configuration for debugging (informational only)
+    auto entry_config = kinematics_.getConfiguration(entry_joints);
+    spdlog::info("Sequence planning from entry config: shoulder={} elbow={} wrist={}",
+        entry_config.shoulder, entry_config.elbow, entry_config.wrist);
+
+    // Convert SequenceWaypoints to legacy Waypoints for validation
+    std::vector<Waypoint> waypoints;
+    waypoints.reserve(sequence.size());
+    for (const auto& sw : sequence.waypoints) {
+        Waypoint wp;
+        wp.position = sw.position;
+        wp.orientation = sw.orientation;
+        wp.blend_radius = sw.blend_radius;
+        wp.segment_time = sw.segment_time;
+        wp.pause_time = sw.pause_time;
+        wp.joints = sw.joints;  // Copy saved joint configuration
+        waypoints.push_back(wp);
+    }
+
+    // Validate all waypoints can be reached with continuous joint motion
+    // This replaces strict configuration checking - we allow joints to cross
+    // arbitrary angular boundaries as long as the motion is smooth
+    JointVector current_joints = entry_joints;
+    for (size_t i = 0; i < waypoints.size(); ++i) {
+        auto pose = waypoints[i].toPose();
+        auto solutions = kinematics_.inverse(pose);
+
+        if (solutions.empty()) {
+            result.valid = false;
+            result.messages.push_back({ValidationSeverity::Error,
+                "Waypoint " + std::to_string(i + 1) + " is unreachable (no IK solution)",
+                i, std::nullopt});
+            return result;
+        }
+
+        // Find a solution reachable with continuous motion (max ~120° per joint)
+        auto continuous_solution = findContinuousSolution(solutions, current_joints);
+
+        if (!continuous_solution.has_value()) {
+            // No continuous solution - this is a real reconfiguration
+            result.valid = false;
+            result.messages.push_back({ValidationSeverity::Error,
+                "Waypoint " + std::to_string(i + 1) + " requires arm reconfiguration "
+                "(large motion on J1/J2/J3/J5). "
+                "Add intermediate waypoints or a setup pose to create a smoother path.",
+                i, std::nullopt});
+            return result;
+        }
+
+        current_joints = *continuous_solution;
+
+        // Log if configuration changed (informational)
+        auto wp_config = kinematics_.getConfiguration(current_joints);
+        if (wp_config != entry_config) {
+            spdlog::info("WP{}: Config changed to shoulder={} elbow={} wrist={} (continuous motion OK)",
+                i + 1, wp_config.shoulder, wp_config.elbow, wp_config.wrist);
+        }
+    }
+
+    // Build segments with endpoint IK pre-computation (for duration estimation)
+    // The actual path IK is solved incrementally in planSegmentLinearCartesian
+    std::vector<Segment> segments;
+    current_joints = entry_joints;
+    double current_time = 0.0;
+
+    for (size_t i = 0; i + 1 < waypoints.size(); ++i) {
+        Segment seg;
+        seg.start_index = i;
+        seg.end_index = i + 1;
+        seg.start_joints = current_joints;
+        seg.start_time = current_time;
+
+        // Handle pause at current waypoint
+        if (waypoints[i].pause_time > 0.0) {
+            current_time += waypoints[i].pause_time;
+        }
+        seg.start_time = current_time;
+
+        auto end_pose = waypoints[i + 1].toPose();
+        Eigen::Vector3d wp_pos = end_pose.translation();
+        spdlog::info("Segment {} creation: WP{} pose pos=[{:.4f}, {:.4f}, {:.4f}]",
+            i, i + 2, wp_pos.x(), wp_pos.y(), wp_pos.z());
+
+        // Use saved waypoint joints if available, otherwise solve IK
+        if (waypoints[i + 1].joints.has_value()) {
+            // Use the taught joint configuration directly
+            seg.end_joints = waypoints[i + 1].joints.value();
+            spdlog::info("  Segment {} using saved waypoint joints: [{:.1f}, {:.1f}, {:.1f}, {:.1f}, {:.1f}, {:.1f}]°",
+                i, seg.end_joints[0]*180/M_PI, seg.end_joints[1]*180/M_PI, seg.end_joints[2]*180/M_PI,
+                seg.end_joints[3]*180/M_PI, seg.end_joints[4]*180/M_PI, seg.end_joints[5]*180/M_PI);
+        } else {
+            // No saved joints - solve IK
+            auto ik_solution = solveIK(end_pose, current_joints);
+            spdlog::info("  Segment {} endpoint IK using {} method",
+                i, config_.ik_method == IKMethod::Numerical ? "numerical" : "analytical");
+
+            if (!ik_solution.has_value()) {
+                spdlog::error("  No IK solution found for WP{}", i + 2);
+                result.valid = false;
+                result.messages.push_back({ValidationSeverity::Error,
+                    "No IK solution for waypoint " + std::to_string(i + 2),
+                    i + 1, std::nullopt});
+                return result;
+            }
+
+            seg.end_joints = *ik_solution;
+        }
+
+        // Log significant joint changes
+        for (int j = 0; j < 6; ++j) {
+            double diff = kinematics::URKinematics::wrapAngle(seg.end_joints[j] - current_joints[j]);
+            if (std::abs(diff) > 0.5) {  // More than ~30 degrees
+                spdlog::info("  J{} changed by {:.1f}° ({:.1f}° -> {:.1f}°)",
+                    j + 1, diff * 180.0 / 3.14159,
+                    current_joints[j] * 180.0 / 3.14159,
+                    seg.end_joints[j] * 180.0 / 3.14159);
+            }
+        }
+
+        // Determine segment duration
+        if (waypoints[i + 1].segment_time > 0.0) {
+            seg.duration = waypoints[i + 1].segment_time;
+        } else {
+            seg.duration = calculateSegmentDuration(seg.start_joints, seg.end_joints);
+        }
+
+        // Check for blending
+        seg.has_blend_in = (i > 0 && waypoints[i].blend_radius > 0.0);
+        seg.has_blend_out = (waypoints[i + 1].blend_radius > 0.0 && i + 2 < waypoints.size());
+
+        // Blend arc geometry computed during planning with actual joints
+        seg.blend_arc = std::nullopt;
+
+        segments.push_back(seg);
+        current_joints = seg.end_joints;  // Chain the seed for next segment
+        current_time += seg.duration;
+    }
+
+    // Plan joint-space motion
+    result.samples = planJointMotion(segments, waypoints);
+
+    if (result.samples.empty()) {
+        result.valid = false;
+        result.messages.push_back({ValidationSeverity::Error,
+            "Linear path planning failed - path may cross singularity within locked configuration",
+            std::nullopt, std::nullopt});
+        return result;
+    }
+
+    result.total_duration = result.samples.back().time;
+    result.valid = true;
+
+    if (!sequence.name.empty()) {
+        result.messages.push_back({ValidationSeverity::Info,
+            "Sequence '" + sequence.name + "' planned: " +
+            std::to_string(waypoints.size()) + " waypoints, " +
+            std::to_string(result.total_duration) + "s",
+            std::nullopt, std::nullopt});
+    }
+
+    return result;
+}
+
+PlannedTrajectory TrajectoryPlanner::planTrajectory(
+    const Trajectory& trajectory,
+    const JointVector& start_joints) {
+
+    PlannedTrajectory result;
+    result.sample_period = 1.0 / config_.sample_rate;
+
+    if (trajectory.empty()) {
+        result.valid = false;
+        result.messages.push_back({ValidationSeverity::Error,
+            "Trajectory contains no elements", std::nullopt, std::nullopt});
+        return result;
+    }
+
+    JointVector current_joints = start_joints;
+    double current_time = 0.0;
+
+    for (size_t elem_idx = 0; elem_idx < trajectory.elements.size(); ++elem_idx) {
+        const auto& element = trajectory.elements[elem_idx];
+        PlannedTrajectory element_traj;
+
+        if (element.type == TrajectoryElementType::SetupPose) {
+            element_traj = planSetupPose(element.setup_pose, current_joints);
+        } else {
+            // Use stored entry_joints if available, otherwise use current_joints
+            bool has_entry = element.sequence.hasEntryJoints();
+            JointVector seq_entry = has_entry
+                ? element.sequence.entry_joints.value()
+                : current_joints;
+            spdlog::info("Planning sequence: hasEntryJoints={}, using joints=[{:.3f}, {:.3f}, {:.3f}, {:.3f}, {:.3f}, {:.3f}]",
+                has_entry, seq_entry[0], seq_entry[1], seq_entry[2], seq_entry[3], seq_entry[4], seq_entry[5]);
+            element_traj = planSequence(element.sequence, seq_entry);
+        }
+
+        // Check for errors
+        if (!element_traj.valid) {
+            result.valid = false;
+            for (auto& msg : element_traj.messages) {
+                msg.message = "Element " + std::to_string(elem_idx + 1) + ": " + msg.message;
+                result.messages.push_back(msg);
+            }
+            return result;
+        }
+
+        // Copy messages
+        for (auto& msg : element_traj.messages) {
+            msg.time = msg.time.has_value() ?
+                std::optional<double>(msg.time.value() + current_time) : std::nullopt;
+            result.messages.push_back(msg);
+        }
+
+        // Append samples with time offset
+        for (const auto& sample : element_traj.samples) {
+            TrajectorySample offset_sample = sample;
+            offset_sample.time += current_time;
+            result.samples.push_back(offset_sample);
+        }
+
+        // Update current state for next element
+        if (!element_traj.samples.empty()) {
+            current_joints = element_traj.samples.back().joints;
+            current_time += element_traj.total_duration;
+        }
+    }
+
+    result.total_duration = current_time;
+    result.valid = true;
+
+    if (!trajectory.name.empty()) {
+        result.messages.push_back({ValidationSeverity::Info,
+            "Trajectory '" + trajectory.name + "' planned: " +
+            std::to_string(trajectory.elements.size()) + " elements, " +
+            std::to_string(result.total_duration) + "s",
+            std::nullopt, std::nullopt});
+    }
+
+    return result;
 }
 
 }  // namespace trajectory

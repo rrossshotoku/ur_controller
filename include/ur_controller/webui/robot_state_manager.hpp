@@ -70,6 +70,55 @@ public:
     /// @return true if command sent successfully
     bool stopJ(double deceleration = 2.0);
 
+    /// @brief Send speedL command for TCP velocity control
+    /// @param tcp_velocity TCP velocity [vx, vy, vz, wx, wy, wz] in m/s and rad/s
+    /// @param acceleration Tool acceleration in m/s^2
+    /// @param time Time to apply velocity (0 = until new command, >0 = duration)
+    /// @return true if command sent successfully
+    bool speedL(const std::array<double, 6>& tcp_velocity,
+                double acceleration = 0.5,
+                double time = 0.0);
+
+    /// @brief Send speedJ command for joint velocity control
+    /// @param joint_velocity Joint velocities in rad/s
+    /// @param acceleration Joint acceleration in rad/s^2
+    /// @param time Time to apply velocity (0 = until new command, >0 = duration)
+    /// @return true if command sent successfully
+    bool speedJ(const std::array<double, 6>& joint_velocity,
+                double acceleration = 1.0,
+                double time = 0.0);
+
+    /// @brief Stop linear motion (exits speedL mode)
+    /// @param deceleration Tool deceleration in m/s^2
+    /// @return true if command sent successfully
+    bool stopL(double deceleration = 0.5);
+
+    /// @brief Stop and release control script (allows switching between control modes)
+    /// @return true if command sent successfully
+    bool speedStop();
+
+    /// @brief Stop servo mode (exits servoJ mode for switching to speedL)
+    /// @return true if command sent successfully
+    bool servoStop();
+
+    /// @brief Move to target joint positions (asynchronous)
+    /// @param target_q Target joint positions in radians
+    /// @param speed Joint speed in rad/s
+    /// @param acceleration Joint acceleration in rad/s^2
+    /// @return true if command sent successfully
+    bool moveJ(const std::array<double, 6>& target_q,
+               double speed = 1.0,
+               double acceleration = 1.4);
+
+    /// @brief Move linearly to target TCP pose (asynchronous)
+    /// @param target_pose Target pose [x, y, z, rx, ry, rz] in meters and axis-angle
+    /// @param speed Linear speed in m/s
+    /// @param acceleration Linear acceleration in m/s^2
+    /// @return true if command sent successfully
+    bool moveL(const std::array<double, 6>& target_pose,
+               double speed = 0.25,
+               double acceleration = 1.2);
+
     /// @brief Check if control is available
     [[nodiscard]] bool hasControl() const;
 

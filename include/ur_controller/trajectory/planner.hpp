@@ -53,7 +53,54 @@ public:
     TrajectoryPlanner(const kinematics::URKinematics& kinematics,
                       const TrajectoryConfig& config);
 
-    /// @brief Plan a trajectory from waypoints
+    // =========================================================================
+    // New API: SetupPose and Sequence planning
+    // =========================================================================
+
+    /// @brief Plan a SetupPose (joint-space move)
+    ///
+    /// Plans a smooth joint-space trajectory from current position to target.
+    /// Uses Ruckig for jerk-limited motion profiles.
+    ///
+    /// @param setup_pose Target setup pose with joint positions
+    /// @param start_joints Current joint configuration
+    /// @return Planned trajectory (joint-space interpolation)
+    [[nodiscard]] PlannedTrajectory planSetupPose(
+        const SetupPose& setup_pose,
+        const JointVector& start_joints);
+
+    /// @brief Plan a Sequence (linear Cartesian moves)
+    ///
+    /// Plans linear moves through waypoints with the arm configuration
+    /// locked based on the entry joints. If any waypoint cannot be reached
+    /// in the locked configuration, planning fails.
+    ///
+    /// @param sequence Sequence of Cartesian waypoints
+    /// @param entry_joints Joint configuration at sequence entry
+    /// @return Planned trajectory with linear TCP paths
+    [[nodiscard]] PlannedTrajectory planSequence(
+        const Sequence& sequence,
+        const JointVector& entry_joints);
+
+    /// @brief Plan a complete Trajectory (setup poses + sequences)
+    ///
+    /// Plans each element in order, chaining them together. SetupPoses use
+    /// joint-space moves, Sequences use linear Cartesian moves with locked
+    /// configuration.
+    ///
+    /// @param trajectory Complete trajectory with elements
+    /// @param start_joints Current joint configuration
+    /// @return Planned trajectory ready for execution
+    [[nodiscard]] PlannedTrajectory planTrajectory(
+        const Trajectory& trajectory,
+        const JointVector& start_joints);
+
+    // =========================================================================
+    // Legacy API (deprecated - use planSequence instead)
+    // =========================================================================
+
+    /// @brief Plan a trajectory from waypoints (legacy)
+    /// @deprecated Use planSequence() for new code
     ///
     /// Validates all waypoints, computes IK solutions, generates smooth
     /// motion profiles, and pre-samples the entire trajectory.
@@ -63,7 +110,8 @@ public:
     [[nodiscard]] PlannedTrajectory plan(
         const std::vector<Waypoint>& waypoints);
 
-    /// @brief Plan a trajectory with custom start joints
+    /// @brief Plan a trajectory with custom start joints (legacy)
+    /// @deprecated Use planSequence() for new code
     ///
     /// Use this when the robot is already at a known configuration.
     ///
@@ -96,6 +144,12 @@ public:
 
     /// @brief Get the validator
     [[nodiscard]] const TrajectoryValidator& validator() const { return validator_; }
+
+    /// @brief Get current IK method
+    [[nodiscard]] IKMethod getIKMethod() const { return config_.ik_method; }
+
+    /// @brief Set IK method
+    void setIKMethod(IKMethod method) { config_.ik_method = method; }
 
 private:
     /// @brief Segment between two waypoints
@@ -181,10 +235,12 @@ private:
     ///
     /// Interpolates TCP position linearly and orientation via SLERP.
     /// Solves IK at each sample point to get joint positions.
+    /// Each IK solution is unwrapped relative to the previous sample,
+    /// so joint angles accumulate naturally without discontinuities.
     ///
     /// @param start_pose Starting TCP pose
     /// @param end_pose Ending TCP pose
-    /// @param start_joints Joint configuration at start (seed for IK)
+    /// @param start_joints Joint configuration at start (angles may be outside ±π)
     /// @param start_time Trajectory time at segment start
     /// @param duration Segment duration in seconds
     /// @param constant_velocity If true, use constant velocity (for blending).
@@ -220,6 +276,18 @@ private:
         double duration,
         bool first_half,
         const Eigen::Isometry3d& end_pose = Eigen::Isometry3d::Identity());
+
+    /// @brief Solve IK using the configured method
+    ///
+    /// Uses analytical IK with filtering (IKMethod::Analytical) or
+    /// numerical IK iteration (IKMethod::Numerical) based on config.
+    ///
+    /// @param pose Target TCP pose
+    /// @param seed Current/seed joint configuration
+    /// @return Joint solution, or nullopt if no solution found
+    [[nodiscard]] std::optional<JointVector> solveIK(
+        const Eigen::Isometry3d& pose,
+        const JointVector& seed) const;
 
     const kinematics::URKinematics& kinematics_;
     TrajectoryConfig config_;

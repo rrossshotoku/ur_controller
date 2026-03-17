@@ -33,6 +33,16 @@ WebServer::WebServer(const WebServerConfig& config)
             }
         });
 
+    // Release servo control when trajectory completes or stops
+    trajectory_executor_->setStateCallback(
+        [this](trajectory::ExecutorState new_state) {
+            if (new_state == trajectory::ExecutorState::Idle) {
+                // Trajectory completed or stopped - release servo mode
+                // so jog controls (speedL/speedJ) can work
+                state_manager_->servoStop();
+            }
+        });
+
     setupRoutes();
     setupWebSocket();
     setupTrajectoryRoutes();
@@ -284,6 +294,108 @@ void WebServer::setupRoutes() {
 
         return crow::response(result);
     });
+
+    // API: Move to joint positions (async move, can be stopped)
+    CROW_ROUTE(app_, "/api/move-to-joints").methods("POST"_method)
+    ([this](const crow::request& req) {
+        crow::json::wvalue result;
+
+        auto body = crow::json::load(req.body);
+        if (!body || !body.has("joints")) {
+            result["success"] = false;
+            result["message"] = "Missing 'joints' array";
+            return crow::response(400, result);
+        }
+
+        auto joints_json = body["joints"];
+        if (joints_json.size() < 6) {
+            result["success"] = false;
+            result["message"] = "joints array must have 6 elements";
+            return crow::response(400, result);
+        }
+
+        std::array<double, 6> target_joints;
+        for (size_t i = 0; i < 6; ++i) {
+            target_joints[i] = joints_json[i].d();
+        }
+
+        double speed = body.has("speed") ? body["speed"].d() : 0.5;
+        double acceleration = body.has("acceleration") ? body["acceleration"].d() : 1.0;
+
+        if (state_manager_->moveJ(target_joints, speed, acceleration)) {
+            result["success"] = true;
+            result["message"] = "Move started";
+        } else {
+            result["success"] = false;
+            result["message"] = "Move command failed";
+        }
+
+        return crow::response(result);
+    });
+
+    // API: Move linearly to TCP pose (async move, can be stopped)
+    CROW_ROUTE(app_, "/api/move-to-pose").methods("POST"_method)
+    ([this](const crow::request& req) {
+        crow::json::wvalue result;
+
+        auto body = crow::json::load(req.body);
+        if (!body) {
+            result["success"] = false;
+            result["message"] = "Invalid JSON body";
+            return crow::response(400, result);
+        }
+
+        // Parse position
+        if (!body.has("position")) {
+            result["success"] = false;
+            result["message"] = "Missing 'position' object";
+            return crow::response(400, result);
+        }
+        auto& pos = body["position"];
+        double x = pos.has("x") ? pos["x"].d() : 0.0;
+        double y = pos.has("y") ? pos["y"].d() : 0.0;
+        double z = pos.has("z") ? pos["z"].d() : 0.0;
+
+        // Parse orientation (quaternion) and convert to axis-angle
+        double rx = 0.0, ry = 0.0, rz = 0.0;
+        if (body.has("orientation")) {
+            auto& ori = body["orientation"];
+            double qw = ori.has("w") ? ori["w"].d() : 1.0;
+            double qx = ori.has("x") ? ori["x"].d() : 0.0;
+            double qy = ori.has("y") ? ori["y"].d() : 0.0;
+            double qz = ori.has("z") ? ori["z"].d() : 0.0;
+
+            // Convert quaternion to axis-angle
+            Eigen::Quaterniond q(qw, qx, qy, qz);
+            q.normalize();
+            Eigen::AngleAxisd aa(q);
+            Eigen::Vector3d axis = aa.axis() * aa.angle();
+            rx = axis.x();
+            ry = axis.y();
+            rz = axis.z();
+        } else {
+            // Use current orientation if not specified
+            auto state = state_manager_->getState();
+            rx = state.tcp_pose[3];
+            ry = state.tcp_pose[4];
+            rz = state.tcp_pose[5];
+        }
+
+        std::array<double, 6> target_pose = {x, y, z, rx, ry, rz};
+
+        double speed = body.has("speed") ? body["speed"].d() : 0.1;
+        double acceleration = body.has("acceleration") ? body["acceleration"].d() : 0.5;
+
+        if (state_manager_->moveL(target_pose, speed, acceleration)) {
+            result["success"] = true;
+            result["message"] = "Linear move started";
+        } else {
+            result["success"] = false;
+            result["message"] = "Move command failed";
+        }
+
+        return crow::response(result);
+    });
 }
 
 void WebServer::setupWebSocket() {
@@ -306,15 +418,36 @@ void WebServer::setupWebSocket() {
 
             std::string type = body.has("type") ? std::string(body["type"].s()) : "";
 
-            if (type == "servoj" && body.has("joints")) {
-                std::array<double, 6> target_q{};
-                auto joints = body["joints"];
-                for (size_t i = 0; i < 6 && i < joints.size(); ++i) {
-                    target_q[i] = joints[i].d();
+            if (type == "speedj" && body.has("velocity")) {
+                // Joint velocity control for joint jogging
+                std::array<double, 6> joint_vel{};
+                auto velocity = body["velocity"];
+                for (size_t i = 0; i < 6 && i < velocity.size(); ++i) {
+                    joint_vel[i] = velocity[i].d();
                 }
-                state_manager_->servoJ(target_q);
+                double accel = body.has("acceleration") ? body["acceleration"].d() : 1.0;
+                // Use time=0.2s to ensure smooth motion when streaming commands
+                state_manager_->speedJ(joint_vel, accel, 0.2);
+            } else if (type == "speedl" && body.has("velocity")) {
+                // TCP velocity control for jogging
+                std::array<double, 6> tcp_vel{};
+                auto velocity = body["velocity"];
+                for (size_t i = 0; i < 3 && i < velocity.size(); ++i) {
+                    tcp_vel[i] = velocity[i].d();
+                }
+                // Angular velocity (optional)
+                if (body.has("angular_velocity")) {
+                    auto angular = body["angular_velocity"];
+                    for (size_t i = 0; i < 3 && i < angular.size(); ++i) {
+                        tcp_vel[i + 3] = angular[i].d();
+                    }
+                }
+                double accel = body.has("acceleration") ? body["acceleration"].d() : 0.5;
+                // Use time=0.2s to ensure smooth motion when streaming commands
+                state_manager_->speedL(tcp_vel, accel, 0.2);
             } else if (type == "stop") {
-                state_manager_->stopJ();
+                // Universal stop for all velocity modes
+                state_manager_->speedStop();
             }
         });
 }
@@ -366,6 +499,21 @@ void WebServer::setupTrajectoryRoutes() {
             }
             if (wp_json.has("pause_time")) {
                 wp.pause_time = wp_json["pause_time"].d();
+            }
+
+            // Parse saved joint positions (captured when waypoint was taught)
+            if (wp_json.has("joints")) {
+                auto& joints_json = wp_json["joints"];
+                if (joints_json.size() == 6) {
+                    kinematics::JointVector joints;
+                    for (size_t j = 0; j < 6; ++j) {
+                        joints[static_cast<Eigen::Index>(j)] = joints_json[j].d();
+                    }
+                    wp.joints = joints;
+                    spdlog::info("  WP{} has saved joints: [{:.2f}, {:.2f}, {:.2f}, {:.2f}, {:.2f}, {:.2f}]°",
+                        i + 1, joints[0]*180/M_PI, joints[1]*180/M_PI, joints[2]*180/M_PI,
+                        joints[3]*180/M_PI, joints[4]*180/M_PI, joints[5]*180/M_PI);
+                }
             }
 
             waypoints.push_back(wp);
@@ -462,6 +610,227 @@ void WebServer::setupTrajectoryRoutes() {
             viz_json["total_duration"] = viz.total_duration;
             viz_json["total_distance"] = viz.total_distance;
             viz_json["max_speed"] = viz.max_speed;
+
+            result["visualization"] = std::move(viz_json);
+        }
+
+        return crow::response(result);
+    });
+
+    // API: Plan trajectory with new format (setup poses + sequences)
+    CROW_ROUTE(app_, "/api/trajectory/plan2").methods("POST"_method)
+    ([this](const crow::request& req) {
+        crow::json::wvalue result;
+
+        auto body = crow::json::load(req.body);
+        if (!body || !body.has("elements")) {
+            result["success"] = false;
+            result["message"] = "Missing 'elements' array";
+            return crow::response(400, result);
+        }
+
+        // Get current robot joints for planning
+        auto robot_state = state_manager_->getState();
+        kinematics::JointVector start_joints;
+        for (int i = 0; i < 6; ++i) {
+            start_joints[i] = robot_state.joint_positions[static_cast<size_t>(i)];
+        }
+
+        // Parse trajectory elements
+        trajectory::Trajectory traj;
+        if (body.has("name")) {
+            traj.name = std::string(body["name"].s());
+        }
+
+        auto elements = body["elements"];
+        for (size_t i = 0; i < elements.size(); ++i) {
+            auto& elem_json = elements[i];
+
+            if (!elem_json.has("type")) {
+                result["success"] = false;
+                result["message"] = "Element " + std::to_string(i + 1) + " missing 'type'";
+                return crow::response(400, result);
+            }
+
+            std::string type = std::string(elem_json["type"].s());
+
+            if (type == "setup_pose") {
+                // Parse setup pose
+                if (!elem_json.has("joints")) {
+                    result["success"] = false;
+                    result["message"] = "Setup pose " + std::to_string(i + 1) + " missing 'joints'";
+                    return crow::response(400, result);
+                }
+
+                trajectory::SetupPose sp;
+                auto joints = elem_json["joints"];
+                for (size_t j = 0; j < 6 && j < joints.size(); ++j) {
+                    sp.joints[static_cast<Eigen::Index>(j)] = joints[j].d();
+                }
+                if (elem_json.has("name")) {
+                    sp.name = std::string(elem_json["name"].s());
+                }
+                if (elem_json.has("move_time")) {
+                    sp.move_time = elem_json["move_time"].d();
+                }
+
+                traj.addSetupPose(sp);
+
+            } else if (type == "sequence") {
+                // Parse sequence
+                if (!elem_json.has("waypoints")) {
+                    result["success"] = false;
+                    result["message"] = "Sequence " + std::to_string(i + 1) + " missing 'waypoints'";
+                    return crow::response(400, result);
+                }
+
+                trajectory::Sequence seq;
+                if (elem_json.has("name")) {
+                    seq.name = std::string(elem_json["name"].s());
+                }
+
+                // Parse entry joints if provided (captured when first waypoint was added)
+                if (elem_json.has("entry_joints")) {
+                    auto entry_j = elem_json["entry_joints"];
+                    spdlog::info("Sequence has entry_joints with {} elements", entry_j.size());
+                    if (entry_j.size() >= 6) {
+                        kinematics::JointVector ej;
+                        for (size_t j = 0; j < 6; ++j) {
+                            ej[static_cast<Eigen::Index>(j)] = entry_j[j].d();
+                        }
+                        seq.entry_joints = ej;
+                        spdlog::info("Parsed entry_joints: [{:.3f}, {:.3f}, {:.3f}, {:.3f}, {:.3f}, {:.3f}]",
+                            ej[0], ej[1], ej[2], ej[3], ej[4], ej[5]);
+                    }
+                } else {
+                    spdlog::warn("Sequence does NOT have entry_joints - will use current robot position");
+                }
+
+                auto waypoints = elem_json["waypoints"];
+                for (size_t w = 0; w < waypoints.size(); ++w) {
+                    auto& wp_json = waypoints[w];
+                    trajectory::SequenceWaypoint wp;
+
+                    // Position
+                    if (wp_json.has("position")) {
+                        auto& pos = wp_json["position"];
+                        wp.position.x() = pos.has("x") ? pos["x"].d() : 0.0;
+                        wp.position.y() = pos.has("y") ? pos["y"].d() : 0.0;
+                        wp.position.z() = pos.has("z") ? pos["z"].d() : 0.0;
+                    }
+
+                    // Orientation (quaternion)
+                    if (wp_json.has("orientation")) {
+                        auto& ori = wp_json["orientation"];
+                        double qw = ori.has("w") ? ori["w"].d() : 1.0;
+                        double qx = ori.has("x") ? ori["x"].d() : 0.0;
+                        double qy = ori.has("y") ? ori["y"].d() : 0.0;
+                        double qz = ori.has("z") ? ori["z"].d() : 0.0;
+                        wp.orientation = Eigen::Quaterniond(qw, qx, qy, qz).normalized();
+                    }
+
+                    // Optional parameters
+                    if (wp_json.has("blend_radius")) {
+                        wp.blend_radius = wp_json["blend_radius"].d();
+                    }
+                    if (wp_json.has("segment_time")) {
+                        wp.segment_time = wp_json["segment_time"].d();
+                    }
+                    if (wp_json.has("pause_time")) {
+                        wp.pause_time = wp_json["pause_time"].d();
+                    }
+
+                    // Parse saved joint positions (captured when waypoint was taught)
+                    if (wp_json.has("joints")) {
+                        auto& joints_json = wp_json["joints"];
+                        if (joints_json.size() == 6) {
+                            kinematics::JointVector joints;
+                            for (size_t j = 0; j < 6; ++j) {
+                                joints[static_cast<Eigen::Index>(j)] = joints_json[j].d();
+                            }
+                            wp.joints = joints;
+                            spdlog::info("  Seq WP{} has saved joints: [{:.2f}, {:.2f}, {:.2f}, {:.2f}, {:.2f}, {:.2f}]°",
+                                w + 1, joints[0]*180/M_PI, joints[1]*180/M_PI, joints[2]*180/M_PI,
+                                joints[3]*180/M_PI, joints[4]*180/M_PI, joints[5]*180/M_PI);
+                        }
+                    }
+
+                    seq.waypoints.push_back(wp);
+                }
+
+                traj.addSequence(seq);
+
+            } else {
+                result["success"] = false;
+                result["message"] = "Unknown element type: " + type;
+                return crow::response(400, result);
+            }
+        }
+
+        // Parse optional config
+        if (body.has("config")) {
+            auto& cfg = body["config"];
+            trajectory::TrajectoryConfig config;
+            if (cfg.has("max_linear_velocity")) {
+                config.max_linear_velocity = cfg["max_linear_velocity"].d();
+            }
+            if (cfg.has("max_linear_acceleration")) {
+                config.max_linear_acceleration = cfg["max_linear_acceleration"].d();
+            }
+            if (cfg.has("max_joint_velocity")) {
+                config.max_joint_velocity = cfg["max_joint_velocity"].d();
+            }
+            trajectory_planner_->setConfig(config);
+        }
+
+        // Plan trajectory
+        auto planned = trajectory_planner_->planTrajectory(traj, start_joints);
+
+        // Store for later execution
+        current_trajectory_ = planned;
+
+        // Build response
+        result["success"] = planned.valid;
+        result["valid"] = planned.valid;
+        result["duration"] = planned.total_duration;
+        result["num_samples"] = planned.samples.size();
+        result["num_elements"] = traj.elements.size();
+
+        // Validation messages
+        crow::json::wvalue messages;
+        for (size_t i = 0; i < planned.messages.size(); ++i) {
+            crow::json::wvalue msg;
+            msg["severity"] = planned.messages[i].severity == trajectory::ValidationSeverity::Error ? "error" :
+                              planned.messages[i].severity == trajectory::ValidationSeverity::Warning ? "warning" : "info";
+            msg["message"] = planned.messages[i].message;
+            if (planned.messages[i].waypoint_index.has_value()) {
+                msg["waypoint"] = *planned.messages[i].waypoint_index;
+            }
+            messages[i] = std::move(msg);
+        }
+        result["messages"] = std::move(messages);
+
+        // Generate visualization data (using samples directly)
+        if (planned.valid && !planned.samples.empty()) {
+            crow::json::wvalue viz_json;
+
+            // Path points (subsample for visualization)
+            crow::json::wvalue path_points;
+            size_t step = std::max<size_t>(1, planned.samples.size() / 200);
+            size_t path_idx = 0;
+            for (size_t i = 0; i < planned.samples.size(); i += step) {
+                const auto& sample = planned.samples[i];
+                crow::json::wvalue point;
+                point["x"] = sample.pose.translation().x();
+                point["y"] = sample.pose.translation().y();
+                point["z"] = sample.pose.translation().z();
+                point["time"] = sample.time;
+                path_points[path_idx++] = std::move(point);
+            }
+            viz_json["path"] = std::move(path_points);
+
+            // Summary
+            viz_json["total_duration"] = planned.total_duration;
 
             result["visualization"] = std::move(viz_json);
         }
@@ -610,6 +979,37 @@ void WebServer::setupTrajectoryRoutes() {
         }
         result["joints"] = std::move(joints);
 
+        return crow::response(result);
+    });
+
+    // API: Get current IK method
+    CROW_ROUTE(app_, "/api/ik-method")
+    ([this]() {
+        crow::json::wvalue result;
+        result["method"] = trajectory::ikMethodToString(trajectory_planner_->getIKMethod());
+        return crow::response(result);
+    });
+
+    // API: Set IK method
+    CROW_ROUTE(app_, "/api/ik-method").methods("POST"_method)
+    ([this](const crow::request& req) {
+        crow::json::wvalue result;
+
+        auto body = crow::json::load(req.body);
+        if (!body || !body.has("method")) {
+            result["success"] = false;
+            result["message"] = "Missing 'method' parameter";
+            return crow::response(400, result);
+        }
+
+        std::string method_str = body["method"].s();
+        auto method = trajectory::ikMethodFromString(method_str);
+        trajectory_planner_->setIKMethod(method);
+
+        spdlog::info("IK method set to: {}", trajectory::ikMethodToString(method));
+
+        result["success"] = true;
+        result["method"] = trajectory::ikMethodToString(method);
         return crow::response(result);
     });
 }

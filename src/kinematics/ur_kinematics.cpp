@@ -277,6 +277,86 @@ std::vector<JointVector> URKinematics::inverse(
     return solutions;
 }
 
+std::optional<JointVector> URKinematics::inverseNumerical(
+    const Eigen::Isometry3d& target,
+    const JointVector& seed,
+    int max_iterations,
+    double tolerance) const {
+
+    JointVector q = seed;
+    const double damping = 0.05;  // Damping factor for DLS (λ)
+
+    // Target position and orientation
+    const Eigen::Vector3d target_pos = target.translation();
+    const Eigen::Quaterniond target_quat(target.rotation());
+
+    for (int iter = 0; iter < max_iterations; ++iter) {
+        // Current pose from FK
+        Eigen::Isometry3d current = forward(q);
+        Eigen::Vector3d current_pos = current.translation();
+        Eigen::Quaterniond current_quat(current.rotation());
+
+        // Position error (3D vector)
+        Eigen::Vector3d pos_error = target_pos - current_pos;
+
+        // Orientation error using quaternion
+        // Error quaternion: q_error = q_target * q_current^(-1)
+        Eigen::Quaterniond q_error = target_quat * current_quat.inverse();
+
+        // Ensure shortest rotation path
+        if (q_error.w() < 0) {
+            q_error.coeffs() = -q_error.coeffs();
+        }
+
+        // Convert to angle-axis representation for 3D angular error
+        Eigen::AngleAxisd aa(q_error);
+        Eigen::Vector3d rot_error = aa.angle() * aa.axis();
+
+        // Combined 6D error vector [position; orientation]
+        Eigen::Matrix<double, 6, 1> error;
+        error.head<3>() = pos_error;
+        error.tail<3>() = rot_error;
+
+        // Check convergence
+        double pos_norm = pos_error.norm();
+        double rot_norm = rot_error.norm();
+        if (pos_norm < tolerance && rot_norm < tolerance) {
+            // Converged - angles stayed close to seed (no wrapping during iteration)
+            return q;
+        }
+
+        // Compute geometric Jacobian at current configuration
+        Jacobian J = jacobian(q);
+
+        // Damped least squares (DLS) pseudo-inverse:
+        // J+ = J^T * (J*J^T + λ²I)^(-1)
+        Eigen::Matrix<double, 6, 6> JJT = J * J.transpose();
+        JJT.diagonal().array() += damping * damping;
+
+        // Solve for Cartesian velocity that reduces error
+        Eigen::Matrix<double, 6, 1> delta_x = JJT.ldlt().solve(error);
+
+        // Convert to joint velocity: delta_q = J^T * delta_x
+        JointVector delta_q = J.transpose() * delta_x;
+
+        // Limit step size to prevent overshooting
+        double max_step = delta_q.cwiseAbs().maxCoeff();
+        if (max_step > 0.5) {  // Max 0.5 rad per iteration (~29 deg)
+            delta_q *= 0.5 / max_step;
+        }
+
+        // Update joint angles - NO WRAPPING during iteration
+        // This preserves continuity when near ±π (like J6 near 180°)
+        q += delta_q;
+
+        // Don't wrap angles during iteration - sin/cos in FK are periodic anyway
+        // Wrapping disrupts convergence when angles cross ±π boundary
+    }
+
+    // Failed to converge within max iterations
+    return std::nullopt;
+}
+
 std::optional<JointVector> URKinematics::selectBestSolution(
     const std::vector<JointVector>& solutions,
     const JointVector& current_q,

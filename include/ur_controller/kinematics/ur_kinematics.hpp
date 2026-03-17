@@ -88,7 +88,7 @@ public:
     // Inverse Kinematics
     // -------------------------------------------------------------------------
 
-    /// @brief Compute all IK solutions for a target pose
+    /// @brief Compute all IK solutions for a target pose (analytical)
     ///
     /// Returns up to 8 joint configurations that reach the target TCP pose.
     /// Solutions are not filtered by joint limits - use selectBestSolution()
@@ -98,6 +98,29 @@ public:
     /// @return Vector of joint configurations (may be empty if unreachable)
     [[nodiscard]] std::vector<JointVector> inverse(
         const Eigen::Isometry3d& target) const;
+
+    /// @brief Compute IK solution using numerical iteration (damped least squares)
+    ///
+    /// Iteratively converges to a solution starting from the seed configuration.
+    /// More robust near singularities than analytical IK, and naturally follows
+    /// the closest solution to the seed (no configuration jumps).
+    ///
+    /// Uses damped least squares (DLS) Jacobian pseudo-inverse:
+    ///   J+ = J^T * (J*J^T + λ²I)^(-1)
+    ///
+    /// @param target Target TCP pose (homogeneous transform, base frame)
+    /// @param seed Starting joint configuration (iteration seed)
+    /// @param max_iterations Maximum iterations before giving up (default 50)
+    /// @param tolerance Convergence tolerance in meters/radians (default 1e-6)
+    /// @return Converged joint solution, or nullopt if failed to converge
+    ///
+    /// @note Typical execution time: 1-10 microseconds (1-5 iterations typical)
+    /// @note Thread-safe: no internal state modified
+    [[nodiscard]] std::optional<JointVector> inverseNumerical(
+        const Eigen::Isometry3d& target,
+        const JointVector& seed,
+        int max_iterations = 50,
+        double tolerance = 1e-6) const;
 
     /// @brief Select the best IK solution from candidates
     ///

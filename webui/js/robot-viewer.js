@@ -11,6 +11,9 @@ export class RobotViewer {
         this.robot = null;
         this.trajectoryLine = null;
         this.waypointMarkers = [];
+        this.baseAxes = null;
+        this.tcpAxes = null;
+        this.tcpAxesGroup = null;
         this.jointNames = [
             'shoulder_pan_joint',
             'shoulder_lift_joint',
@@ -62,12 +65,108 @@ export class RobotViewer {
         const gridHelper = new THREE.GridHelper(2, 20, 0x444444, 0x222222);
         this.scene.add(gridHelper);
 
-        // Axes helper at origin
-        const axesHelper = new THREE.AxesHelper(0.15);
-        this.scene.add(axesHelper);
+        // Create labeled base frame axes
+        this.baseAxes = this.createLabeledAxes(0.2, 'Base');
+        this.scene.add(this.baseAxes);
+
+        // Create TCP frame axes (will be updated based on robot pose)
+        this.tcpAxesGroup = new THREE.Group();
+        this.tcpAxes = this.createLabeledAxes(0.1, 'TCP');
+        this.tcpAxesGroup.add(this.tcpAxes);
+        this.scene.add(this.tcpAxesGroup);
 
         // Handle window resize
         window.addEventListener('resize', () => this.onResize());
+    }
+
+    createLabeledAxes(size, label) {
+        const group = new THREE.Group();
+
+        // Arrow parameters
+        const headLength = size * 0.2;
+        const headWidth = size * 0.1;
+
+        // Robot coordinate system is Z-up, Three.js is Y-up
+        // Conversion: Three.js (x, y, z) = Robot (x, z, -y)
+        // So in Three.js coordinates:
+        // - Robot X axis (forward) = Three.js X direction (1, 0, 0)
+        // - Robot Y axis (left)    = Three.js -Z direction (0, 0, -1)
+        // - Robot Z axis (up)      = Three.js Y direction (0, 1, 0)
+
+        // Robot X axis (Red) - points in Three.js X direction
+        const xDir = new THREE.Vector3(1, 0, 0);
+        const xArrow = new THREE.ArrowHelper(xDir, new THREE.Vector3(0, 0, 0), size, 0xff0000, headLength, headWidth);
+        group.add(xArrow);
+
+        // Robot Y axis (Green) - points in Three.js -Z direction
+        const yDir = new THREE.Vector3(0, 0, -1);
+        const yArrow = new THREE.ArrowHelper(yDir, new THREE.Vector3(0, 0, 0), size, 0x00ff00, headLength, headWidth);
+        group.add(yArrow);
+
+        // Robot Z axis (Blue) - points in Three.js Y direction
+        const zDir = new THREE.Vector3(0, 1, 0);
+        const zArrow = new THREE.ArrowHelper(zDir, new THREE.Vector3(0, 0, 0), size, 0x0088ff, headLength, headWidth);
+        group.add(zArrow);
+
+        // Create text labels using sprites
+        const labelOffset = size * 1.15;
+
+        // X label at end of X axis (Three.js X direction)
+        const xLabel = this.createTextSprite('X', 0xff0000);
+        xLabel.position.set(labelOffset, 0, 0);
+        xLabel.scale.set(0.1, 0.05, 1);
+        group.add(xLabel);
+
+        // Y label at end of Y axis (Three.js -Z direction)
+        const yLabel = this.createTextSprite('Y', 0x00ff00);
+        yLabel.position.set(0, 0, -labelOffset);
+        yLabel.scale.set(0.1, 0.05, 1);
+        group.add(yLabel);
+
+        // Z label at end of Z axis (Three.js Y direction)
+        const zLabel = this.createTextSprite('Z', 0x0088ff);
+        zLabel.position.set(0, labelOffset, 0);
+        zLabel.scale.set(0.1, 0.05, 1);
+        group.add(zLabel);
+
+        // Add frame label
+        if (label) {
+            const frameLabel = this.createTextSprite(label, 0xffffff);
+            frameLabel.position.set(0, -size * 0.3, 0);
+            frameLabel.scale.set(0.15, 0.06, 1);
+            group.add(frameLabel);
+        }
+
+        return group;
+    }
+
+    createTextSprite(text, color) {
+        const canvas = document.createElement('canvas');
+        const context = canvas.getContext('2d');
+        canvas.width = 128;
+        canvas.height = 64;
+
+        // Clear canvas
+        context.fillStyle = 'transparent';
+        context.fillRect(0, 0, canvas.width, canvas.height);
+
+        // Draw text
+        context.font = 'Bold 48px Arial';
+        context.textAlign = 'center';
+        context.textBaseline = 'middle';
+        context.fillStyle = '#' + color.toString(16).padStart(6, '0');
+        context.fillText(text, canvas.width / 2, canvas.height / 2);
+
+        const texture = new THREE.CanvasTexture(canvas);
+        texture.needsUpdate = true;
+
+        const material = new THREE.SpriteMaterial({
+            map: texture,
+            transparent: true,
+            depthTest: false
+        });
+
+        return new THREE.Sprite(material);
     }
 
     loadRobot() {
@@ -111,6 +210,40 @@ export class RobotViewer {
             if (this.robot.joints[jointName]) {
                 this.robot.setJointValue(jointName, jointPositions[i]);
             }
+        }
+    }
+
+    updateTcpPose(tcpPose) {
+        // tcpPose: {x, y, z, rx, ry, rz} - position in meters, rotation as axis-angle
+        if (!this.tcpAxesGroup || !tcpPose) return;
+
+        // Convert from robot coordinates (Z-up) to Three.js (Y-up)
+        // Robot: X=forward, Y=left, Z=up
+        // Three.js: X=right, Y=up, Z=towards camera
+        // Conversion: Three.js (x, y, z) = Robot (x, z, -y)
+        this.tcpAxesGroup.position.set(tcpPose.x, tcpPose.z, -tcpPose.y);
+
+        // Convert axis-angle rotation
+        const rx = tcpPose.rx;
+        const ry = tcpPose.ry;
+        const rz = tcpPose.rz;
+        const angle = Math.sqrt(rx * rx + ry * ry + rz * rz);
+
+        if (angle > 1e-6) {
+            // Normalize axis
+            const ax = rx / angle;
+            const ay = ry / angle;
+            const az = rz / angle;
+
+            // Convert axis from robot to Three.js coordinates
+            const threeAxis = new THREE.Vector3(ax, az, -ay).normalize();
+
+            // Create quaternion from axis-angle
+            const quaternion = new THREE.Quaternion();
+            quaternion.setFromAxisAngle(threeAxis, angle);
+            this.tcpAxesGroup.quaternion.copy(quaternion);
+        } else {
+            this.tcpAxesGroup.quaternion.identity();
         }
     }
 

@@ -18,10 +18,155 @@ namespace trajectory {
 using kinematics::JointVector;
 
 // =============================================================================
-// Waypoint Definition (from UI)
+// Setup Pose - Joint-space target (executed as joint move)
 // =============================================================================
 
-/// @brief A single waypoint in a trajectory
+/// @brief A setup pose defined by joint positions
+/// @details Executed as a joint-space move (MoveJ style) via servoJ streaming.
+/// Used to get the robot into a known configuration before a linear sequence.
+struct SetupPose {
+    JointVector joints;             ///< Target joint positions (radians)
+    std::string name;               ///< Optional name/label for this pose
+    double move_time{0.0};          ///< Time to reach pose (0 = auto based on limits)
+
+    /// @brief Create SetupPose from joint array
+    static SetupPose fromJoints(const JointVector& q, const std::string& label = "") {
+        SetupPose sp;
+        sp.joints = q;
+        sp.name = label;
+        return sp;
+    }
+
+    /// @brief Create SetupPose from raw array
+    static SetupPose fromArray(const std::array<double, 6>& q, const std::string& label = "") {
+        SetupPose sp;
+        for (size_t i = 0; i < 6; ++i) {
+            sp.joints[static_cast<Eigen::Index>(i)] = q[i];
+        }
+        sp.name = label;
+        return sp;
+    }
+};
+
+// =============================================================================
+// Sequence Waypoint - Cartesian target (executed as linear move)
+// =============================================================================
+
+/// @brief A waypoint in a linear sequence (Cartesian space)
+/// @details Part of a Sequence that is executed as linear moves (MoveL style).
+/// The arm configuration is locked at the start of the sequence.
+struct SequenceWaypoint {
+    Eigen::Vector3d position{0, 0, 0};          ///< XYZ position in meters (base frame)
+    Eigen::Quaterniond orientation{1, 0, 0, 0}; ///< Orientation as quaternion
+
+    double blend_radius{0.0};   ///< Blend radius in meters (0 = stop at waypoint)
+    double segment_time{0.0};   ///< Time to reach this waypoint from previous (0 = auto)
+    double pause_time{0.0};     ///< Time to pause at this waypoint
+
+    /// @brief Joint positions when this waypoint was taught (optional)
+    /// @details If set, these joints define the intended arm configuration for this pose
+    std::optional<Eigen::Matrix<double, 6, 1>> joints;
+
+    /// @brief Convert to Eigen::Isometry3d pose
+    [[nodiscard]] Eigen::Isometry3d toPose() const {
+        Eigen::Isometry3d pose = Eigen::Isometry3d::Identity();
+        pose.translation() = position;
+        pose.linear() = orientation.toRotationMatrix();
+        return pose;
+    }
+
+    /// @brief Create waypoint from Isometry3d pose
+    static SequenceWaypoint fromPose(const Eigen::Isometry3d& pose) {
+        SequenceWaypoint wp;
+        wp.position = pose.translation();
+        wp.orientation = Eigen::Quaterniond(pose.rotation());
+        return wp;
+    }
+};
+
+// =============================================================================
+// Sequence - Linear motion through Cartesian waypoints
+// =============================================================================
+
+/// @brief A sequence of Cartesian waypoints executed as linear moves
+/// @details The arm configuration is determined by the robot's joint positions
+/// at the start of the sequence and remains locked throughout.
+struct Sequence {
+    std::vector<SequenceWaypoint> waypoints;    ///< Waypoints to traverse
+    std::string name;                            ///< Optional name/label
+    std::optional<JointVector> entry_joints;     ///< Joint config when first waypoint was captured
+
+    /// @brief Check if sequence is empty
+    [[nodiscard]] bool empty() const { return waypoints.empty(); }
+
+    /// @brief Number of waypoints
+    [[nodiscard]] size_t size() const { return waypoints.size(); }
+
+    /// @brief Check if entry joints are specified
+    [[nodiscard]] bool hasEntryJoints() const { return entry_joints.has_value(); }
+};
+
+// =============================================================================
+// Trajectory Element - Either a SetupPose or a Sequence
+// =============================================================================
+
+/// @brief Type of trajectory element
+enum class TrajectoryElementType {
+    SetupPose,  ///< Joint-space move to a setup pose
+    Sequence    ///< Linear moves through Cartesian waypoints
+};
+
+/// @brief A single element in a trajectory (either SetupPose or Sequence)
+struct TrajectoryElement {
+    TrajectoryElementType type;
+    SetupPose setup_pose;       ///< Valid if type == SetupPose
+    Sequence sequence;          ///< Valid if type == Sequence
+
+    /// @brief Create a SetupPose element
+    static TrajectoryElement makeSetupPose(const SetupPose& pose) {
+        TrajectoryElement elem;
+        elem.type = TrajectoryElementType::SetupPose;
+        elem.setup_pose = pose;
+        return elem;
+    }
+
+    /// @brief Create a Sequence element
+    static TrajectoryElement makeSequence(const Sequence& seq) {
+        TrajectoryElement elem;
+        elem.type = TrajectoryElementType::Sequence;
+        elem.sequence = seq;
+        return elem;
+    }
+};
+
+/// @brief A complete trajectory consisting of setup poses and sequences
+struct Trajectory {
+    std::vector<TrajectoryElement> elements;    ///< Ordered list of elements
+    std::string name;                            ///< Optional trajectory name
+
+    /// @brief Add a setup pose to the trajectory
+    void addSetupPose(const SetupPose& pose) {
+        elements.push_back(TrajectoryElement::makeSetupPose(pose));
+    }
+
+    /// @brief Add a sequence to the trajectory
+    void addSequence(const Sequence& seq) {
+        elements.push_back(TrajectoryElement::makeSequence(seq));
+    }
+
+    /// @brief Check if trajectory is empty
+    [[nodiscard]] bool empty() const { return elements.empty(); }
+
+    /// @brief Number of elements
+    [[nodiscard]] size_t size() const { return elements.size(); }
+};
+
+// =============================================================================
+// Legacy Waypoint (for backward compatibility)
+// =============================================================================
+
+/// @brief A single waypoint in a trajectory (legacy - use SequenceWaypoint)
+/// @deprecated Use SequenceWaypoint for new code
 struct Waypoint {
     Eigen::Vector3d position{0, 0, 0};      ///< XYZ position in meters (base frame)
     Eigen::Quaterniond orientation{1, 0, 0, 0}; ///< Orientation as quaternion
@@ -29,6 +174,9 @@ struct Waypoint {
     double blend_radius{0.0};   ///< Blend radius in meters (0 = stop at waypoint)
     double segment_time{0.0};   ///< Time to reach this waypoint from previous (0 = auto)
     double pause_time{0.0};     ///< Time to pause at this waypoint
+
+    /// @brief Joint positions when this waypoint was taught (optional)
+    std::optional<Eigen::Matrix<double, 6, 1>> joints;
 
     /// @brief Convert to Eigen::Isometry3d pose
     [[nodiscard]] Eigen::Isometry3d toPose() const {
@@ -45,7 +193,44 @@ struct Waypoint {
         wp.orientation = Eigen::Quaterniond(pose.rotation());
         return wp;
     }
+
+    /// @brief Convert to SequenceWaypoint
+    [[nodiscard]] SequenceWaypoint toSequenceWaypoint() const {
+        SequenceWaypoint sw;
+        sw.position = position;
+        sw.orientation = orientation;
+        sw.blend_radius = blend_radius;
+        sw.segment_time = segment_time;
+        sw.pause_time = pause_time;
+        sw.joints = joints;
+        return sw;
+    }
 };
+
+// =============================================================================
+// IK Method Selection
+// =============================================================================
+
+/// @brief Method for solving inverse kinematics during trajectory planning
+enum class IKMethod {
+    Analytical,     ///< Fast closed-form solution (up to 8 solutions)
+    Numerical       ///< Iterative damped least squares (follows seed)
+};
+
+/// @brief Convert IKMethod to string
+[[nodiscard]] inline const char* ikMethodToString(IKMethod method) {
+    switch (method) {
+        case IKMethod::Analytical: return "analytical";
+        case IKMethod::Numerical:  return "numerical";
+        default:                   return "unknown";
+    }
+}
+
+/// @brief Parse IKMethod from string
+[[nodiscard]] inline IKMethod ikMethodFromString(const std::string& str) {
+    if (str == "numerical") return IKMethod::Numerical;
+    return IKMethod::Analytical;  // Default to analytical
+}
 
 // =============================================================================
 // Trajectory Configuration
@@ -67,6 +252,9 @@ struct TrajectoryConfig {
     // Planning parameters
     double sample_rate{500.0};              ///< Hz (samples per second)
     double path_tolerance{0.001};           ///< meters (for blend arc computation)
+
+    // IK solver method
+    IKMethod ik_method{IKMethod::Analytical};   ///< IK solver to use
 };
 
 // =============================================================================

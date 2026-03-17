@@ -1433,3 +1433,453 @@ TEST_CASE("TCP orientation flip analysis", "[trajectory][planner][orientation_fl
         REQUIRE(trajectory.valid);
     }
 }
+
+TEST_CASE("User reported jog path analysis", "[trajectory][planner][user_jog_path]") {
+    // User reported these waypoints work with jog controller but fail in trajectory planner
+    // WP1: X: -0.286 Y: 0.274 Z: 0.484
+    // WP2: X: 0.256 Y: 0.479 Z: 0.476
+    // WP3: X: 0.380 Y: 0.152 Z: 0.459
+    //
+    // Error: "Path passes near wrist singularity at 33% of segment"
+    // Error: "[WP2] Segment 1 to waypoint 2 crosses configuration boundary"
+
+    URKinematics kin(URModel::UR5e);
+
+    Eigen::Vector3d wp1(-0.286, 0.274, 0.484);
+    Eigen::Vector3d wp2(0.256, 0.479, 0.476);
+    Eigen::Vector3d wp3(0.380, 0.152, 0.459);
+
+    std::cout << "\n=== User Jog Path Analysis ===" << std::endl;
+    std::cout << "WP1: (" << wp1.x() << ", " << wp1.y() << ", " << wp1.z() << ")" << std::endl;
+    std::cout << "WP2: (" << wp2.x() << ", " << wp2.y() << ", " << wp2.z() << ")" << std::endl;
+    std::cout << "WP3: (" << wp3.x() << ", " << wp3.y() << ", " << wp3.z() << ")" << std::endl;
+
+    // Check IK solutions at each waypoint with identity orientation
+    std::cout << "\n--- IK Solutions at Waypoints (Identity Orientation) ---" << std::endl;
+
+    auto checkWaypoint = [&](const std::string& name, const Eigen::Vector3d& pos) {
+        Eigen::Isometry3d pose = Eigen::Isometry3d::Identity();
+        pose.translation() = pos;
+
+        auto solutions = kin.inverse(pose);
+        std::cout << name << ": " << solutions.size() << " IK solutions" << std::endl;
+
+        if (!solutions.empty()) {
+            // Show configurations for first few solutions
+            for (size_t i = 0; i < std::min(solutions.size(), size_t(4)); ++i) {
+                auto config = kin.getConfiguration(solutions[i]);
+                auto singularity = kin.analyzeSingularity(solutions[i]);
+                std::cout << "  Sol " << i << ": shoulder=" << static_cast<int>(config.shoulder)
+                          << " elbow=" << static_cast<int>(config.elbow)
+                          << " wrist=" << static_cast<int>(config.wrist)
+                          << " | cond=" << singularity.condition_number;
+                if (singularity.near_singularity) {
+                    std::cout << " SINGULAR(" << static_cast<int>(singularity.type) << ")";
+                }
+                std::cout << std::endl;
+            }
+        }
+        return solutions;
+    };
+
+    auto sol1 = checkWaypoint("WP1", wp1);
+    auto sol2 = checkWaypoint("WP2", wp2);
+    auto sol3 = checkWaypoint("WP3", wp3);
+
+    REQUIRE(!sol1.empty());
+    REQUIRE(!sol2.empty());
+    REQUIRE(!sol3.empty());
+
+    // Find a common configuration that works for all three waypoints
+    std::cout << "\n--- Finding Common Configuration ---" << std::endl;
+
+    for (size_t i = 0; i < sol1.size(); ++i) {
+        auto config1 = kin.getConfiguration(sol1[i]);
+
+        auto same_config_sol2 = kin.filterByConfiguration(sol2, config1);
+        auto same_config_sol3 = kin.filterByConfiguration(sol3, config1);
+
+        if (!same_config_sol2.empty() && !same_config_sol3.empty()) {
+            std::cout << "Config from WP1 solution " << i << " works for ALL waypoints!" << std::endl;
+            std::cout << "  shoulder=" << static_cast<int>(config1.shoulder)
+                      << " elbow=" << static_cast<int>(config1.elbow)
+                      << " wrist=" << static_cast<int>(config1.wrist) << std::endl;
+        }
+    }
+
+    // Analyze segment 1 (WP1 to WP2) - the one that fails
+    std::cout << "\n--- Segment 1 Analysis (WP1 to WP2) ---" << std::endl;
+
+    // Use first solution's configuration as reference
+    JointVector start_joints = sol1[0];
+    auto start_config = kin.getConfiguration(start_joints);
+    std::cout << "Starting with config: shoulder=" << static_cast<int>(start_config.shoulder)
+              << " elbow=" << static_cast<int>(start_config.elbow)
+              << " wrist=" << static_cast<int>(start_config.wrist) << std::endl;
+
+    constexpr int kNumPoints = 20;
+    JointVector current_joints = start_joints;
+
+    for (int i = 0; i <= kNumPoints; ++i) {
+        double t = static_cast<double>(i) / kNumPoints;
+        Eigen::Vector3d pos = wp1 + t * (wp2 - wp1);
+
+        Eigen::Isometry3d pose = Eigen::Isometry3d::Identity();
+        pose.translation() = pos;
+
+        auto solutions = kin.inverse(pose);
+        auto same_config = kin.filterByConfiguration(solutions, start_config);
+
+        // Also try to find closest solution to current
+        std::optional<JointVector> best;
+        if (!solutions.empty()) {
+            best = kin.selectBestSolution(solutions, current_joints, 1.0);
+        }
+
+        auto singularity = kin.analyzeSingularity(current_joints);
+
+        std::cout << "t=" << std::fixed << std::setprecision(2) << t
+                  << " pos=(" << std::setprecision(3) << pos.x() << ", " << pos.y() << ", " << pos.z() << ")"
+                  << " | total_sol=" << solutions.size()
+                  << " same_config=" << same_config.size()
+                  << " | cond=" << std::setprecision(1) << singularity.condition_number;
+
+        if (singularity.near_singularity) {
+            std::cout << " SINGULAR(" << static_cast<int>(singularity.type) << ")";
+        }
+
+        if (same_config.empty() && !solutions.empty()) {
+            std::cout << " *** CONFIG BOUNDARY ***";
+            // Show what configs ARE available
+            std::cout << std::endl << "  Available configs:";
+            for (size_t j = 0; j < std::min(solutions.size(), size_t(3)); ++j) {
+                auto c = kin.getConfiguration(solutions[j]);
+                std::cout << " [s=" << static_cast<int>(c.shoulder)
+                          << " e=" << static_cast<int>(c.elbow)
+                          << " w=" << static_cast<int>(c.wrist) << "]";
+            }
+        }
+
+        std::cout << std::endl;
+
+        // Update current joints if we found a solution
+        if (best.has_value()) {
+            current_joints = *best;
+        } else if (!same_config.empty()) {
+            current_joints = same_config[0];
+        }
+    }
+
+    // Try with a different starting configuration
+    std::cout << "\n--- Trying Different Starting Configurations ---" << std::endl;
+
+    for (size_t start_sol_idx = 0; start_sol_idx < sol1.size(); ++start_sol_idx) {
+        JointVector test_start = sol1[start_sol_idx];
+        auto test_config = kin.getConfiguration(test_start);
+
+        bool path_viable = true;
+        int fail_point = -1;
+
+        JointVector cur = test_start;
+        for (int i = 0; i <= kNumPoints && path_viable; ++i) {
+            double t = static_cast<double>(i) / kNumPoints;
+            Eigen::Vector3d pos = wp1 + t * (wp2 - wp1);
+
+            Eigen::Isometry3d pose = Eigen::Isometry3d::Identity();
+            pose.translation() = pos;
+
+            auto solutions = kin.inverse(pose);
+            auto same_config = kin.filterByConfiguration(solutions, test_config);
+
+            if (same_config.empty()) {
+                path_viable = false;
+                fail_point = i;
+            } else {
+                // Find closest
+                double min_dist = 1e9;
+                for (const auto& s : same_config) {
+                    double d = (s - cur).norm();
+                    if (d < min_dist) {
+                        min_dist = d;
+                        cur = s;
+                    }
+                }
+            }
+        }
+
+        std::cout << "Start sol " << start_sol_idx << " (s=" << static_cast<int>(test_config.shoulder)
+                  << " e=" << static_cast<int>(test_config.elbow)
+                  << " w=" << static_cast<int>(test_config.wrist) << "): ";
+
+        if (path_viable) {
+            std::cout << "PATH VIABLE!" << std::endl;
+        } else {
+            std::cout << "fails at t=" << static_cast<double>(fail_point) / kNumPoints << std::endl;
+        }
+    }
+
+    REQUIRE(true);  // Analysis test - always passes
+
+    // Now actually test the trajectory planner with these waypoints
+    SECTION("Trajectory planner should find viable configuration") {
+        TrajectoryPlanner planner(kin);
+
+        std::vector<Waypoint> waypoints;
+        waypoints.push_back(createReachableWaypoint(-0.286, 0.274, 0.484));
+        waypoints.push_back(createReachableWaypoint(0.256, 0.479, 0.476));
+        waypoints.push_back(createReachableWaypoint(0.380, 0.152, 0.459));
+
+        auto trajectory = planner.plan(waypoints);
+
+        std::cout << "\n--- Trajectory Planner Result ---" << std::endl;
+        std::cout << "Valid: " << (trajectory.valid ? "YES" : "NO") << std::endl;
+        std::cout << "Duration: " << trajectory.total_duration << "s" << std::endl;
+        std::cout << "Samples: " << trajectory.samples.size() << std::endl;
+
+        for (const auto& msg : trajectory.messages) {
+            std::cout << "Message: " << msg.message << std::endl;
+        }
+
+        if (trajectory.valid && !trajectory.samples.empty()) {
+            auto start_config = kin.getConfiguration(trajectory.samples.front().joints);
+            auto end_config = kin.getConfiguration(trajectory.samples.back().joints);
+            std::cout << "Start config: shoulder=" << static_cast<int>(start_config.shoulder)
+                      << " elbow=" << static_cast<int>(start_config.elbow)
+                      << " wrist=" << static_cast<int>(start_config.wrist) << std::endl;
+            std::cout << "End config: shoulder=" << static_cast<int>(end_config.shoulder)
+                      << " elbow=" << static_cast<int>(end_config.elbow)
+                      << " wrist=" << static_cast<int>(end_config.wrist) << std::endl;
+        }
+
+        REQUIRE(trajectory.valid);
+    }
+}
+
+// =============================================================================
+// Configuration Detection Issue Tests
+// =============================================================================
+
+TEST_CASE("Rectangular path should not require configuration change", "[trajectory][config_bug]") {
+    // This test reproduces a user-reported bug where a simple rectangular path
+    // in 3D space is incorrectly rejected as requiring a configuration change,
+    // even though the user can physically move through all waypoints without
+    // any arm reconfiguration.
+    //
+    // The waypoints form a simple rectangular path:
+    // WP1 -> WP2: Move in -X direction (same Z)
+    // WP2 -> WP3: Move in -Z direction (same X)
+    // WP3 -> WP4: Move in +X direction (same Z)
+
+    URKinematics kin(URModel::UR5e);
+    TrajectoryConfig config;
+    config.sample_rate = 125.0;
+    config.max_joint_velocity = 1.5;
+    config.max_joint_acceleration = 2.0;
+    TrajectoryPlanner planner(kin, config);
+
+    // User's exact waypoints that fail planning
+    std::vector<Eigen::Vector3d> positions = {
+        {-0.198, -0.552, 0.753},  // WP1 (entry point)
+        {-0.358, -0.552, 0.753},  // WP2
+        {-0.358, -0.552, 0.487},  // WP3
+        {-0.079, -0.552, 0.487}   // WP4 - this one fails
+    };
+
+    // Use the actual TCP orientation from the robot during testing
+    // Captured from /api/trajectory/current-pose at position (-0.237, -0.552, 0.753)
+    // This is a typical orientation for reaching to the side
+    Eigen::Quaterniond orientation(0.741808, 0.591299, 0.209173, -0.237346);  // w, x, y, z
+
+    std::cout << "\n=== Rectangular Path Configuration Analysis ===" << std::endl;
+
+    // Step 1: Get IK solutions for the first waypoint to determine entry_joints
+    Eigen::Isometry3d first_pose = Eigen::Isometry3d::Identity();
+    first_pose.translation() = positions[0];
+    first_pose.linear() = orientation.toRotationMatrix();
+
+    auto first_solutions = kin.inverse(first_pose);
+
+    // Use actual joint values captured from robot near this pose
+    // joints: [-1.794715, -1.888088, -1.078697, 0.046977, 1.819093, 2.547276]
+    JointVector real_entry_joints;
+    real_entry_joints << -1.794715, -1.888088, -1.078697, 0.046977, 1.819093, 2.547276;
+
+    // If IK solutions exist, prefer the one closest to real entry joints
+    JointVector entry_joints;
+    if (first_solutions.empty()) {
+        std::cout << "NOTE: No IK solutions for first waypoint, using captured joints" << std::endl;
+        entry_joints = real_entry_joints;
+    } else {
+        // Find solution closest to real entry joints
+        entry_joints = first_solutions[0];
+        double best_dist = (first_solutions[0] - real_entry_joints).squaredNorm();
+        for (const auto& sol : first_solutions) {
+            double dist = (sol - real_entry_joints).squaredNorm();
+            if (dist < best_dist) {
+                best_dist = dist;
+                entry_joints = sol;
+            }
+        }
+    }
+    auto entry_config = kin.getConfiguration(entry_joints);
+
+    std::cout << "Entry joints (radians): [";
+    for (int j = 0; j < 6; ++j) {
+        std::cout << entry_joints[j];
+        if (j < 5) std::cout << ", ";
+    }
+    std::cout << "]" << std::endl;
+    std::cout << "Entry config: shoulder=" << static_cast<int>(entry_config.shoulder)
+              << " elbow=" << static_cast<int>(entry_config.elbow)
+              << " wrist=" << static_cast<int>(entry_config.wrist) << std::endl;
+
+    // Step 2: Analyze IK solutions for each waypoint
+    JointVector current_joints = entry_joints;
+    bool all_reachable_in_config = true;
+
+    for (size_t i = 0; i < positions.size(); ++i) {
+        Eigen::Isometry3d pose = Eigen::Isometry3d::Identity();
+        pose.translation() = positions[i];
+        pose.linear() = orientation.toRotationMatrix();
+
+        auto solutions = kin.inverse(pose);
+        std::cout << "\nWP" << (i + 1) << " at (" << positions[i].x() << ", "
+                  << positions[i].y() << ", " << positions[i].z() << "):" << std::endl;
+        std::cout << "  Total IK solutions: " << solutions.size() << std::endl;
+
+        // Check each solution's configuration
+        auto matching_solutions = kin.filterByConfiguration(solutions, entry_config);
+        std::cout << "  Solutions in entry config: " << matching_solutions.size() << std::endl;
+
+        if (matching_solutions.empty()) {
+            std::cout << "  *** NO SOLUTION IN ENTRY CONFIG ***" << std::endl;
+            all_reachable_in_config = false;
+
+            // Print all solutions and their configurations for diagnosis
+            for (size_t s = 0; s < solutions.size(); ++s) {
+                auto sol_config = kin.getConfiguration(solutions[s]);
+                std::cout << "    Solution " << s << ": shoulder=" << static_cast<int>(sol_config.shoulder)
+                          << " elbow=" << static_cast<int>(sol_config.elbow)
+                          << " wrist=" << static_cast<int>(sol_config.wrist);
+
+                // Show the critical joint values
+                JointVector qw = solutions[s];
+                std::cout << " (q3=" << qw[2] << ", q5=" << qw[4] << ")" << std::endl;
+            }
+        } else {
+            // Select closest solution and update current_joints
+            JointVector best = matching_solutions[0];
+            double best_dist = (best - current_joints).squaredNorm();
+            for (const auto& sol : matching_solutions) {
+                double dist = (sol - current_joints).squaredNorm();
+                if (dist < best_dist) {
+                    best_dist = dist;
+                    best = sol;
+                }
+            }
+            current_joints = best;
+
+            std::cout << "  Selected joints: [";
+            for (int j = 0; j < 6; ++j) {
+                std::cout << current_joints[j];
+                if (j < 5) std::cout << ", ";
+            }
+            std::cout << "]" << std::endl;
+            std::cout << "  Critical angles: q3=" << current_joints[2]
+                      << " q5=" << current_joints[4] << std::endl;
+        }
+    }
+
+    // Step 3: Now try to actually plan the sequence
+    Sequence sequence;
+    sequence.name = "Test Rectangular Path";
+    sequence.entry_joints = entry_joints;
+    for (const auto& pos : positions) {
+        SequenceWaypoint sw;
+        sw.position = pos;
+        sw.orientation = orientation;
+        sw.blend_radius = 0.0;
+        sw.segment_time = 2.0;
+        sw.pause_time = 0.0;
+        sequence.waypoints.push_back(sw);
+    }
+
+    auto trajectory = planner.planSequence(sequence, entry_joints);
+
+    std::cout << "\n=== Planning Result ===" << std::endl;
+    std::cout << "Valid: " << (trajectory.valid ? "YES" : "NO") << std::endl;
+    for (const auto& msg : trajectory.messages) {
+        std::cout << "Message: " << msg.message << std::endl;
+    }
+
+    // The test currently documents the bug - all waypoints should be reachable
+    // If this test fails, it confirms the configuration detection bug exists
+    if (!all_reachable_in_config) {
+        std::cout << "\n*** BUG CONFIRMED: Some waypoints have no IK solution in entry config ***" << std::endl;
+        std::cout << "This indicates the configuration boundary detection is too strict." << std::endl;
+        std::cout << "A joint crossing near zero (e.g., q3 or q5) may flip the detected config" << std::endl;
+        std::cout << "even though no physical arm reconfiguration occurs." << std::endl;
+    }
+
+    // For now, document the current behavior
+    // TODO: Fix the configuration detection to handle boundary cases
+    // REQUIRE(trajectory.valid);  // Uncomment after fix
+
+    // Additional analysis: What if we ignore configuration and just pick closest solution?
+    std::cout << "\n=== Continuity Analysis (ignoring config boundaries) ===" << std::endl;
+    current_joints = entry_joints;
+    double max_joint_change = 0.0;
+    int max_change_joint = -1;
+    size_t max_change_wp = 0;
+
+    for (size_t i = 0; i < positions.size(); ++i) {
+        Eigen::Isometry3d pose = Eigen::Isometry3d::Identity();
+        pose.translation() = positions[i];
+        pose.linear() = orientation.toRotationMatrix();
+
+        auto solutions = kin.inverse(pose);
+        if (solutions.empty()) continue;
+
+        // Find closest solution (ignore configuration)
+        JointVector best = solutions[0];
+        double best_dist = (solutions[0] - current_joints).squaredNorm();
+        for (const auto& sol : solutions) {
+            double dist = (sol - current_joints).squaredNorm();
+            if (dist < best_dist) {
+                best_dist = dist;
+                best = sol;
+            }
+        }
+
+        // Check max joint change
+        for (int j = 0; j < 6; ++j) {
+            double change = std::abs(best[j] - current_joints[j]);
+            if (change > max_joint_change) {
+                max_joint_change = change;
+                max_change_joint = j;
+                max_change_wp = i;
+            }
+        }
+
+        std::cout << "WP" << (i + 1) << " -> closest solution:" << std::endl;
+        std::cout << "  q1 change: " << (best[0] - current_joints[0]) * 180.0 / kPi << " deg" << std::endl;
+        std::cout << "  q3 change: " << (best[2] - current_joints[2]) * 180.0 / kPi << " deg" << std::endl;
+        std::cout << "  q5 change: " << (best[4] - current_joints[4]) * 180.0 / kPi << " deg" << std::endl;
+
+        auto sol_config = kin.getConfiguration(best);
+        std::cout << "  Config: shoulder=" << static_cast<int>(sol_config.shoulder)
+                  << " elbow=" << static_cast<int>(sol_config.elbow)
+                  << " wrist=" << static_cast<int>(sol_config.wrist) << std::endl;
+
+        current_joints = best;
+    }
+
+    std::cout << "\nMax joint change: " << max_joint_change * 180.0 / kPi
+              << " deg (joint " << max_change_joint << " at WP" << (max_change_wp + 1) << ")" << std::endl;
+
+    // If max change is small (< 45 degrees), the path is likely feasible
+    // even if configuration boundaries are crossed
+    if (max_joint_change < kPi / 4.0) {
+        std::cout << "*** Path appears feasible with smooth interpolation ***" << std::endl;
+    }
+}

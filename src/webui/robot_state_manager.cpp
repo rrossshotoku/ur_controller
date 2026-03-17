@@ -186,6 +186,138 @@ bool RobotStateManager::stopJ(double deceleration) {
     }
 }
 
+bool RobotStateManager::speedL(const std::array<double, 6>& tcp_velocity,
+                                double acceleration,
+                                double time) {
+    std::lock_guard<std::mutex> lock(control_mutex_);
+
+    if (!rtde_control_) {
+        return false;
+    }
+
+    try {
+        std::vector<double> vel(tcp_velocity.begin(), tcp_velocity.end());
+        // time parameter: how long to apply velocity (0 = until new command)
+        // Using a small positive time ensures smooth motion when streaming
+        rtde_control_->speedL(vel, acceleration, time);
+        return true;
+    } catch (const std::exception& e) {
+        spdlog::error("speedL failed: {}", e.what());
+        return false;
+    }
+}
+
+bool RobotStateManager::speedJ(const std::array<double, 6>& joint_velocity,
+                                double acceleration,
+                                double time) {
+    std::lock_guard<std::mutex> lock(control_mutex_);
+
+    if (!rtde_control_) {
+        return false;
+    }
+
+    try {
+        std::vector<double> vel(joint_velocity.begin(), joint_velocity.end());
+        rtde_control_->speedJ(vel, acceleration, time);
+        return true;
+    } catch (const std::exception& e) {
+        spdlog::error("speedJ failed: {}", e.what());
+        return false;
+    }
+}
+
+bool RobotStateManager::stopL(double deceleration) {
+    std::lock_guard<std::mutex> lock(control_mutex_);
+
+    if (!rtde_control_) {
+        return false;
+    }
+
+    try {
+        rtde_control_->stopL(deceleration);
+        return true;
+    } catch (const std::exception& e) {
+        spdlog::error("stopL failed: {}", e.what());
+        return false;
+    }
+}
+
+bool RobotStateManager::speedStop() {
+    std::lock_guard<std::mutex> lock(control_mutex_);
+
+    if (!rtde_control_) {
+        return false;
+    }
+
+    try {
+        // Stop linear motion - use speedStop which is designed for speedL
+        rtde_control_->speedStop();
+        return true;
+    } catch (const std::exception& e) {
+        spdlog::error("speedStop failed: {}", e.what());
+        return false;
+    }
+}
+
+bool RobotStateManager::servoStop() {
+    std::lock_guard<std::mutex> lock(control_mutex_);
+
+    if (!rtde_control_) {
+        return false;
+    }
+
+    try {
+        // Stop servo mode - use servoStop which is designed for servoJ
+        rtde_control_->servoStop();
+        return true;
+    } catch (const std::exception& e) {
+        spdlog::error("servoStop failed: {}", e.what());
+        return false;
+    }
+}
+
+bool RobotStateManager::moveJ(const std::array<double, 6>& target_q,
+                               double speed,
+                               double acceleration) {
+    std::lock_guard<std::mutex> lock(control_mutex_);
+
+    if (!rtde_control_) {
+        return false;
+    }
+
+    try {
+        // Convert array to vector for ur_rtde
+        std::vector<double> q(target_q.begin(), target_q.end());
+        // async=true so it returns immediately (can be stopped with stopJ)
+        rtde_control_->moveJ(q, speed, acceleration, true);
+        return true;
+    } catch (const std::exception& e) {
+        spdlog::error("moveJ failed: {}", e.what());
+        return false;
+    }
+}
+
+bool RobotStateManager::moveL(const std::array<double, 6>& target_pose,
+                               double speed,
+                               double acceleration) {
+    std::lock_guard<std::mutex> lock(control_mutex_);
+
+    if (!rtde_control_) {
+        return false;
+    }
+
+    try {
+        // Convert array to vector for ur_rtde
+        std::vector<double> pose(target_pose.begin(), target_pose.end());
+        // async=true so it returns immediately (can be stopped with stopL)
+        rtde_control_->moveL(pose, speed, acceleration, true);
+        return true;
+    } catch (const std::exception& e) {
+        spdlog::error("moveL failed: {}", e.what());
+        return false;
+    }
+}
+
 bool RobotStateManager::hasControl() const {
     std::lock_guard<std::mutex> lock(state_mutex_);
     return current_state_.control_available;

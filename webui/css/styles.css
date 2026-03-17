@@ -125,27 +125,27 @@ main {
 
 /* Robot view panel */
 #robot-view-panel {
-    flex: 2;
+    flex: 1;  /* Reduced from 2 to 1 */
     display: flex;
     flex-direction: column;
-    min-height: 450px;
+    min-height: 400px;
+    max-width: 500px;
 }
 
 #robot-viewer {
     flex: 1;
     background-color: var(--bg-secondary);
     border-radius: 4px;
-    min-height: 350px;
+    min-height: 300px;
 }
 
 /* Side panels */
 .side-panels {
-    flex: 1;
+    flex: 2;  /* Increased from 1 to 2 */
     display: flex;
     flex-direction: column;
     gap: 15px;
-    min-width: 350px;
-    max-width: 450px;
+    min-width: 400px;
 }
 
 #control-panel {
@@ -252,6 +252,169 @@ main {
     border: 1px solid var(--border-color);
 }
 
+/* Jog Panel */
+#jog-panel {
+    flex: 0 0 auto;
+}
+
+.jog-frame-selector {
+    display: flex;
+    gap: 20px;
+    margin-bottom: 15px;
+}
+
+.radio-label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+}
+
+.radio-label input[type="radio"] {
+    accent-color: var(--accent-blue);
+}
+
+.jog-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    margin-bottom: 15px;
+}
+
+.jog-row {
+    display: flex;
+    gap: 5px;
+    justify-content: center;
+}
+
+.jog-btn {
+    width: 50px;
+    height: 50px;
+    background-color: var(--bg-secondary);
+    border: 2px solid var(--border-color);
+    border-radius: 8px;
+    color: var(--text-primary);
+    font-weight: bold;
+    font-size: 0.9rem;
+    cursor: pointer;
+    transition: all 0.1s;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: manipulation;
+}
+
+.jog-btn:hover {
+    border-color: var(--accent-blue);
+    background-color: rgba(0, 153, 255, 0.1);
+}
+
+.jog-btn:active {
+    background-color: var(--accent-blue);
+    border-color: var(--accent-blue);
+    transform: scale(0.95);
+}
+
+.jog-spacer {
+    width: 50px;
+    height: 50px;
+}
+
+.jog-center {
+    width: 50px;
+    height: 50px;
+    background-color: var(--bg-primary);
+    border-radius: 8px;
+    border: 1px dashed var(--border-color);
+}
+
+.jog-speed-control {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.jog-speed-control label {
+    font-size: 0.9rem;
+    color: var(--text-secondary);
+}
+
+.jog-speed-control input[type="range"] {
+    width: 100%;
+    height: 6px;
+    -webkit-appearance: none;
+    background: var(--bg-secondary);
+    border-radius: 3px;
+    outline: none;
+}
+
+.jog-speed-control input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 16px;
+    height: 16px;
+    background: var(--accent-blue);
+    border-radius: 50%;
+    cursor: pointer;
+}
+
+/* Joint Jog Grid */
+.joint-jog-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 15px;
+}
+
+.joint-jog-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.joint-label {
+    width: 30px;
+    font-weight: bold;
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+}
+
+.joint-value {
+    width: 60px;
+    text-align: center;
+    font-family: 'Consolas', monospace;
+    font-size: 0.85rem;
+    color: var(--text-primary);
+    background-color: var(--bg-primary);
+    padding: 4px;
+    border-radius: 4px;
+}
+
+.joint-jog-btn {
+    width: 40px;
+    height: 36px;
+    background-color: var(--bg-secondary);
+    border: 2px solid var(--border-color);
+    border-radius: 6px;
+    color: var(--text-primary);
+    font-weight: bold;
+    font-size: 1.2rem;
+    cursor: pointer;
+    transition: all 0.1s;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: manipulation;
+}
+
+.joint-jog-btn:hover {
+    border-color: var(--accent-blue);
+    background-color: rgba(0, 153, 255, 0.1);
+}
+
+.joint-jog-btn:active {
+    background-color: var(--accent-blue);
+    border-color: var(--accent-blue);
+    transform: scale(0.95);
+}
+
 /* Status panel */
 .status-row {
     display: flex;
@@ -322,6 +485,50 @@ main {
     gap: 10px;
     flex-wrap: wrap;
     margin-bottom: 15px;
+}
+
+/* IK Method Toggle */
+.ik-method-toggle {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    background-color: var(--bg-secondary);
+    border-radius: 4px;
+    margin-bottom: 15px;
+    border: 1px solid var(--border-color);
+}
+
+.ik-method-toggle .label {
+    font-size: 0.9rem;
+    color: var(--text-secondary);
+}
+
+.ik-method-toggle .btn-group {
+    display: flex;
+    gap: 5px;
+}
+
+.ik-method-toggle .btn-small {
+    padding: 6px 12px;
+    font-size: 0.85rem;
+    background-color: var(--bg-panel);
+    border: 1px solid var(--border-color);
+    color: var(--text-secondary);
+    cursor: pointer;
+    border-radius: 4px;
+    transition: all 0.2s ease;
+}
+
+.ik-method-toggle .btn-small:hover {
+    border-color: var(--accent-blue);
+    color: var(--text-primary);
+}
+
+.ik-method-toggle .btn-small.active {
+    background-color: var(--accent-blue);
+    border-color: var(--accent-blue);
+    color: white;
 }
 
 .btn-success {
@@ -450,6 +657,192 @@ main {
     background-color: rgba(0, 153, 255, 0.2);
     color: var(--accent-blue);
     border-left: 3px solid var(--accent-blue);
+}
+
+/* Trajectory Elements (Setup Pose / Sequence) */
+#elements-container {
+    max-height: 300px;
+    overflow-y: auto;
+    margin-top: 10px;
+}
+
+.help-text {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    margin-bottom: 10px;
+}
+
+.trajectory-element {
+    background-color: var(--bg-secondary);
+    border-radius: 6px;
+    margin-bottom: 10px;
+    border: 1px solid var(--border-color);
+    overflow: hidden;
+}
+
+.trajectory-element:hover {
+    border-color: var(--accent-blue);
+}
+
+.element-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    background-color: rgba(0, 0, 0, 0.2);
+}
+
+.setup-pose-header {
+    border-left: 3px solid var(--accent-orange);
+}
+
+.sequence-header {
+    border-left: 3px solid var(--accent-green);
+}
+
+.element-type {
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    padding: 2px 6px;
+    border-radius: 3px;
+    background-color: var(--bg-primary);
+}
+
+.setup-pose-header .element-type {
+    color: var(--accent-orange);
+}
+
+.sequence-header .element-type {
+    color: var(--accent-green);
+}
+
+.element-name {
+    font-weight: 500;
+    flex: 1;
+}
+
+.waypoint-count {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+}
+
+.element-content {
+    padding: 10px 12px;
+}
+
+.joints-display {
+    font-family: 'Consolas', monospace;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    word-spacing: 8px;
+}
+
+.sequence-waypoint {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px;
+    background-color: var(--bg-primary);
+    border-radius: 4px;
+    margin-bottom: 6px;
+}
+
+.sequence-waypoint:last-child {
+    margin-bottom: 0;
+}
+
+.waypoint-params {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.btn-group {
+    display: flex;
+    gap: 6px;
+}
+
+/* Moveable targets (click-hold to move robot) */
+.moveable-target {
+    cursor: pointer;
+    border: 1px dashed transparent;
+    border-radius: 4px;
+    padding: 8px;
+    margin: -8px;
+    margin-bottom: 6px;
+    transition: all 0.15s ease;
+    position: relative;
+}
+
+.moveable-target:hover {
+    background-color: rgba(0, 153, 255, 0.1);
+    border-color: var(--accent-blue);
+}
+
+.moveable-target:active,
+.moveable-target.moving {
+    background-color: rgba(0, 204, 102, 0.2);
+    border-color: var(--accent-green);
+}
+
+.moveable-target .move-hint {
+    display: none;
+    font-size: 0.7rem;
+    color: var(--accent-blue);
+    margin-bottom: 4px;
+}
+
+.moveable-target:hover .move-hint {
+    display: block;
+}
+
+/* Moveable pose (linear move to waypoint) */
+.moveable-pose {
+    cursor: pointer;
+    border-radius: 4px;
+    padding: 4px 8px;
+    transition: all 0.15s ease;
+    border: 1px solid transparent;
+}
+
+.moveable-pose:hover {
+    background-color: rgba(255, 153, 0, 0.15);
+    border-color: var(--accent-orange);
+}
+
+.moveable-pose:active,
+.moveable-pose.moving {
+    background-color: rgba(0, 204, 102, 0.2);
+    border-color: var(--accent-green);
+}
+
+/* Sequence entry point */
+.sequence-entry-point {
+    background-color: rgba(0, 153, 255, 0.05);
+    border: 1px dashed var(--border-color);
+    border-radius: 4px;
+    padding: 8px;
+    margin-bottom: 10px;
+}
+
+.sequence-entry-point:hover {
+    background-color: rgba(0, 153, 255, 0.15);
+    border-color: var(--accent-blue);
+}
+
+.sequence-entry-point:active,
+.sequence-entry-point.moving {
+    background-color: rgba(0, 204, 102, 0.2);
+    border-color: var(--accent-green);
+}
+
+.entry-label {
+    display: block;
+    font-size: 0.75rem;
+    color: var(--accent-blue);
+    margin-bottom: 4px;
+    font-weight: 500;
 }
 
 /* Responsive */

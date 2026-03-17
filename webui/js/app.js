@@ -1,17 +1,16 @@
 // UR Controller Web UI - Main Application
 
 import { RobotViewer } from './robot-viewer.js';
-import { ControlPanel } from './control-panel.js';
 import { WebSocketClient } from './websocket-client.js';
 import { TrajectoryPanel } from './trajectory-panel.js';
+import { JogController } from './jog-controller.js';
 
 class App {
     constructor() {
         this.robotViewer = null;
-        this.controlPanel = null;
         this.wsClient = null;
         this.trajectoryPanel = null;
-        this.controlEnabled = false;
+        this.jogController = null;
 
         this.init();
     }
@@ -20,13 +19,6 @@ class App {
         // Initialize 3D viewer
         const viewerContainer = document.getElementById('robot-viewer');
         this.robotViewer = new RobotViewer(viewerContainer);
-
-        // Initialize control panel
-        this.controlPanel = new ControlPanel({
-            onServoJ: (joints) => this.sendServoJ(joints),
-            onStop: () => this.sendStop(),
-            onSnapToCurrent: () => this.snapToCurrent()
-        });
 
         // Initialize trajectory panel
         this.trajectoryPanel = new TrajectoryPanel({
@@ -40,6 +32,9 @@ class App {
             onStateUpdate: (state) => this.handleStateUpdate(state),
             onConnectionChange: (connected) => this.handleConnectionChange(connected)
         });
+
+        // Initialize jog controller (needs wsClient)
+        this.jogController = new JogController(this.wsClient);
 
         // Set up button handlers
         this.setupButtonHandlers();
@@ -55,25 +50,11 @@ class App {
     }
 
     setupButtonHandlers() {
-        const btnEnable = document.getElementById('btn-enable');
         const btnStop = document.getElementById('btn-stop');
-        const btnSnap = document.getElementById('btn-snap');
         const btnReconnect = document.getElementById('btn-reconnect');
-
-        btnEnable.addEventListener('click', () => {
-            this.controlEnabled = !this.controlEnabled;
-            btnEnable.textContent = this.controlEnabled ? 'Disable Control' : 'Enable Control';
-            btnEnable.classList.toggle('btn-danger', this.controlEnabled);
-            btnEnable.classList.toggle('btn-primary', !this.controlEnabled);
-            this.controlPanel.setEnabled(this.controlEnabled);
-        });
 
         btnStop.addEventListener('click', () => {
             this.sendStop();
-        });
-
-        btnSnap.addEventListener('click', () => {
-            this.snapToCurrent();
         });
 
         btnReconnect.addEventListener('click', () => {
@@ -137,29 +118,45 @@ class App {
             this.robotViewer.updateJoints(state.joints);
         }
 
-        // Update control panel (actual values)
-        if (this.controlPanel && state.joints) {
-            this.controlPanel.updateActualPositions(state.joints);
+        // Update TCP axes in 3D viewer
+        if (this.robotViewer && state.tcp_pose) {
+            this.robotViewer.updateTcpPose(state.tcp_pose);
+        }
+
+        // Update joint value displays
+        if (state.joints) {
+            this.updateJointValues(state.joints);
+        }
+
+        // Update jog controller with TCP pose for frame transforms
+        if (this.jogController && state.tcp_pose) {
+            const tcpPose = [
+                state.tcp_pose.x, state.tcp_pose.y, state.tcp_pose.z,
+                state.tcp_pose.rx, state.tcp_pose.ry, state.tcp_pose.rz
+            ];
+            this.jogController.updateTcpPose(tcpPose);
         }
 
         // Update status display
         this.updateStatusDisplay(state);
 
-        // Update control availability
-        const btnEnable = document.getElementById('btn-enable');
+        // Update control availability warning
         const warning = document.getElementById('control-warning');
-
         if (state.control_available) {
-            btnEnable.disabled = false;
             warning.classList.add('hidden');
         } else {
-            btnEnable.disabled = true;
-            this.controlEnabled = false;
-            btnEnable.textContent = 'Enable Control';
-            btnEnable.classList.remove('btn-danger');
-            btnEnable.classList.add('btn-primary');
-            this.controlPanel.setEnabled(false);
             warning.classList.remove('hidden');
+        }
+    }
+
+    updateJointValues(joints) {
+        // Convert radians to degrees for display
+        const RAD_TO_DEG = 180 / Math.PI;
+        for (let i = 0; i < 6; i++) {
+            const el = document.getElementById(`joint-value-${i}`);
+            if (el) {
+                el.textContent = (joints[i] * RAD_TO_DEG).toFixed(1) + '\u00B0';
+            }
         }
     }
 
@@ -196,23 +193,10 @@ class App {
         }
     }
 
-    sendServoJ(joints) {
-        if (!this.controlEnabled) return;
-
-        this.wsClient.send({
-            type: 'servoj',
-            joints: joints
-        });
-    }
-
     sendStop() {
         this.wsClient.send({
             type: 'stop'
         });
-    }
-
-    snapToCurrent() {
-        this.controlPanel.snapToCurrent();
     }
 }
 
