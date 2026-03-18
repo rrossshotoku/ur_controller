@@ -861,90 +861,9 @@ std::vector<TrajectorySample> TrajectoryPlanner::planSegmentWithHalfArc(
     Eigen::Vector3d v_start = arc_info.arc_start - arc_info.center;
     double half_arc_angle = arc_info.arc_angle / 2.0;
 
-    // =========================================================================
-    // Singularity preview: Find max condition number along path
-    // =========================================================================
-    constexpr int kPreviewSamples = 30;
-    double max_condition_number = 1.0;
-    JointVector preview_joints = start_joints;
-
-    for (int i = 0; i < kPreviewSamples; ++i) {
-        double t = static_cast<double>(i) / (kPreviewSamples - 1);
-        double dist_along_path = t * total_distance;
-
-        Eigen::Vector3d pos;
-        Eigen::Quaterniond quat;
-
-        if (first_half) {
-            if (dist_along_path <= linear_distance && linear_distance > 0.001) {
-                double linear_t = dist_along_path / linear_distance;
-                pos = linear_start + linear_t * (linear_end - linear_start);
-                quat = linear_start_quat.slerp(linear_t, linear_end_quat);
-            } else {
-                double arc_dist = dist_along_path - linear_distance;
-                double arc_t = (half_arc_length > 0.001) ? (arc_dist / half_arc_length) : 0.0;
-                arc_t = std::clamp(arc_t, 0.0, 1.0);
-                double angle = arc_t * half_arc_angle;
-                Eigen::Vector3d v_rotated =
-                    v_start * std::cos(angle) +
-                    arc_info.normal.cross(v_start) * std::sin(angle) +
-                    arc_info.normal * arc_info.normal.dot(v_start) * (1 - std::cos(angle));
-                pos = arc_info.center + v_rotated;
-                quat = arc_info.start_orientation.slerp(arc_t * 0.5, arc_info.end_orientation);
-            }
-        } else {
-            if (dist_along_path <= half_arc_length && half_arc_length > 0.001) {
-                double arc_t = dist_along_path / half_arc_length;
-                double angle = half_arc_angle + arc_t * half_arc_angle;
-                Eigen::Vector3d v_rotated =
-                    v_start * std::cos(angle) +
-                    arc_info.normal.cross(v_start) * std::sin(angle) +
-                    arc_info.normal * arc_info.normal.dot(v_start) * (1 - std::cos(angle));
-                pos = arc_info.center + v_rotated;
-                quat = arc_info.start_orientation.slerp(0.5 + arc_t * 0.5, arc_info.end_orientation);
-            } else {
-                double linear_dist = dist_along_path - half_arc_length;
-                double linear_t = (linear_distance > 0.001) ? (linear_dist / linear_distance) : 1.0;
-                linear_t = std::clamp(linear_t, 0.0, 1.0);
-                pos = linear_start + linear_t * (linear_end - linear_start);
-                quat = linear_start_quat.slerp(linear_t, linear_end_quat);
-            }
-        }
-
-        Eigen::Isometry3d preview_pose = Eigen::Isometry3d::Identity();
-        preview_pose.translation() = pos;
-        preview_pose.linear() = quat.toRotationMatrix();
-
-        auto ik_solution = solveIK(preview_pose, preview_joints);
-        if (!ik_solution.has_value()) {
-            spdlog::error("Blend path unreachable at position [{:.3f}, {:.3f}, {:.3f}] "
-                "(t={:.1f}%). No IK solution found.",
-                pos.x(), pos.y(), pos.z(), static_cast<double>(i) / (kPreviewSamples - 1) * 100.0);
-            return {};
-        }
-        preview_joints = *ik_solution;
-        auto singularity_info = kinematics_.analyzeSingularity(preview_joints);
-        max_condition_number = std::max(max_condition_number, singularity_info.condition_number);
-    }
-
-    // Compute time scaling
-    double nominal_tcp_velocity = total_distance / duration;
-    double max_allowed_tcp_velocity = config_.max_joint_velocity / max_condition_number;
-    double time_scale = 1.0;
-
-    if (nominal_tcp_velocity > max_allowed_tcp_velocity && max_allowed_tcp_velocity > 0.0) {
-        time_scale = nominal_tcp_velocity / max_allowed_tcp_velocity;
-        constexpr double kMaxTimeScale = 100.0;
-        if (time_scale > kMaxTimeScale) {
-            time_scale = kMaxTimeScale;
-        }
-    }
-
-    double scaled_duration = duration * time_scale;
-
-    // Calculate number of samples with scaled duration
+    // Calculate number of samples
     double sample_period = 1.0 / config_.sample_rate;
-    int num_samples = static_cast<int>(scaled_duration * config_.sample_rate) + 1;
+    int num_samples = static_cast<int>(duration * config_.sample_rate) + 1;
     if (num_samples < 2) num_samples = 2;
 
     // Track previous joints - angles accumulate naturally
@@ -952,7 +871,7 @@ std::vector<TrajectorySample> TrajectoryPlanner::planSegmentWithHalfArc(
 
     for (int i = 0; i < num_samples; ++i) {
         double t = static_cast<double>(i) / (num_samples - 1);
-        double sample_time = start_time + t * scaled_duration;
+        double sample_time = start_time + t * duration;
 
         // Distance along the combined path
         double dist_along_path = t * total_distance;
@@ -1361,60 +1280,10 @@ std::vector<TrajectorySample> TrajectoryPlanner::planBlendArcCartesian(
     // Compute vector from center to arc start
     Eigen::Vector3d v_start = arc_info.arc_start - arc_info.center;
 
-    // =========================================================================
-    // Singularity preview: Find max condition number along arc
-    // =========================================================================
-    constexpr int kPreviewSamples = 20;
-    double max_condition_number = 1.0;
-    JointVector preview_joints = arc_info.start_joints;
-
-    for (int i = 0; i < kPreviewSamples; ++i) {
-        double t = static_cast<double>(i) / (kPreviewSamples - 1);
-        double current_angle = t * arc_info.arc_angle;
-
-        Eigen::Vector3d v_rotated =
-            v_start * std::cos(current_angle) +
-            arc_info.normal.cross(v_start) * std::sin(current_angle) +
-            arc_info.normal * arc_info.normal.dot(v_start) * (1 - std::cos(current_angle));
-
-        Eigen::Vector3d arc_point = arc_info.center + v_rotated;
-        Eigen::Quaterniond orientation = arc_info.start_orientation.slerp(t, arc_info.end_orientation);
-
-        Eigen::Isometry3d preview_pose = Eigen::Isometry3d::Identity();
-        preview_pose.translation() = arc_point;
-        preview_pose.linear() = orientation.toRotationMatrix();
-
-        auto ik_solution = solveIK(preview_pose, preview_joints);
-        if (!ik_solution.has_value()) {
-            spdlog::error("Blend arc unreachable at position [{:.3f}, {:.3f}, {:.3f}] "
-                "(t={:.1f}%). No IK solution found.",
-                arc_point.x(), arc_point.y(), arc_point.z(), t * 100.0);
-            return {};
-        }
-        preview_joints = *ik_solution;
-        auto singularity_info = kinematics_.analyzeSingularity(preview_joints);
-        max_condition_number = std::max(max_condition_number, singularity_info.condition_number);
-    }
-
-    // Compute time scaling
-    double nominal_tcp_velocity = arc_info.arc_length / arc_duration;
-    double max_allowed_tcp_velocity = config_.max_joint_velocity / max_condition_number;
-    double time_scale = 1.0;
-
-    if (nominal_tcp_velocity > max_allowed_tcp_velocity && max_allowed_tcp_velocity > 0.0) {
-        time_scale = nominal_tcp_velocity / max_allowed_tcp_velocity;
-        constexpr double kMaxTimeScale = 100.0;
-        if (time_scale > kMaxTimeScale) {
-            time_scale = kMaxTimeScale;
-        }
-    }
-
-    double scaled_duration = arc_duration * time_scale;
-
-    int num_samples = static_cast<int>(scaled_duration * config_.sample_rate);
+    int num_samples = static_cast<int>(arc_duration * config_.sample_rate);
     if (num_samples < 2) num_samples = 2;
 
-    double sample_period = scaled_duration / (num_samples - 1);
+    double sample_period = arc_duration / (num_samples - 1);
 
     // Use Rodrigues' rotation formula to interpolate along the arc
     for (int i = 0; i < num_samples; ++i) {
