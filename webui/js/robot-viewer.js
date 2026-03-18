@@ -10,6 +10,7 @@ export class RobotViewer {
         this.container = container;
         this.robot = null;
         this.trajectoryLine = null;
+        this.pathSampleMarkers = [];
         this.waypointMarkers = [];
         this.baseAxes = null;
         this.tcpAxes = null;
@@ -287,13 +288,13 @@ export class RobotViewer {
             this.trajectoryLine = null;
         }
 
-        // Remove existing waypoint markers
-        this.waypointMarkers.forEach(marker => {
+        // Remove existing path sample markers
+        this.pathSampleMarkers.forEach(marker => {
             this.scene.remove(marker);
             marker.geometry.dispose();
             marker.material.dispose();
         });
-        this.waypointMarkers = [];
+        this.pathSampleMarkers = [];
 
         // If no path, we're done
         if (!path || path.length === 0) return;
@@ -309,31 +310,62 @@ export class RobotViewer {
 
         this.trajectoryLine = new THREE.Line(geometry, material);
         this.scene.add(this.trajectoryLine);
+    }
 
-        // Add waypoint markers at key points
-        const markerGeometry = new THREE.SphereGeometry(0.015, 16, 16);
-        const markerMaterial = new THREE.MeshBasicMaterial({ color: 0x0099ff });
+    // Update waypoint markers (user-defined waypoints, not path samples)
+    updateWaypoints(waypoints) {
+        // Remove existing waypoint markers
+        this.waypointMarkers.forEach(marker => {
+            this.scene.remove(marker);
+            if (marker.geometry) marker.geometry.dispose();
+            if (marker.material) marker.material.dispose();
+            // Also dispose label if it exists
+            if (marker.label) {
+                this.scene.remove(marker.label);
+                if (marker.label.material && marker.label.material.map) {
+                    marker.label.material.map.dispose();
+                }
+                if (marker.label.material) marker.label.material.dispose();
+            }
+        });
+        this.waypointMarkers = [];
 
-        // Add markers every N points
-        const step = Math.max(1, Math.floor(path.length / 20));
-        for (let i = 0; i < path.length; i += step) {
-            const p = path[i];
-            const marker = new THREE.Mesh(markerGeometry.clone(), markerMaterial.clone());
-            marker.position.set(p.x, p.z, -p.y);  // Convert to Y-up
+        // If no waypoints, we're done
+        if (!waypoints || waypoints.length === 0) return;
+
+        waypoints.forEach((wp, index) => {
+            // Determine marker color based on type
+            let color;
+            let size;
+            if (wp.type === 'setup_pose') {
+                color = 0xff9900;  // Orange for setup poses
+                size = 0.025;
+            } else if (wp.isEntry) {
+                color = 0x0099ff;  // Blue for entry points
+                size = 0.022;
+            } else {
+                color = 0xff4488;  // Pink for sequence waypoints
+                size = 0.02;
+            }
+
+            // Create sphere marker
+            const markerGeometry = new THREE.SphereGeometry(size, 16, 16);
+            const markerMaterial = new THREE.MeshBasicMaterial({ color: color });
+            const marker = new THREE.Mesh(markerGeometry, markerMaterial);
+
+            // Convert from robot coords (Z-up) to Three.js (Y-up)
+            marker.position.set(wp.position.x, wp.position.z, -wp.position.y);
             this.scene.add(marker);
-            this.waypointMarkers.push(marker);
-        }
 
-        // Always add end point marker
-        if (path.length > 1) {
-            const endPoint = path[path.length - 1];
-            const endMarker = new THREE.Mesh(
-                new THREE.SphereGeometry(0.02, 16, 16),
-                new THREE.MeshBasicMaterial({ color: 0xff4444 })
-            );
-            endMarker.position.set(endPoint.x, endPoint.z, -endPoint.y);
-            this.scene.add(endMarker);
-            this.waypointMarkers.push(endMarker);
-        }
+            // Create label sprite
+            const labelText = wp.label || `WP${index + 1}`;
+            const label = this.createTextSprite(labelText, color);
+            label.position.set(wp.position.x, wp.position.z + size + 0.03, -wp.position.y);
+            label.scale.set(0.08, 0.04, 1);
+            this.scene.add(label);
+
+            marker.label = label;
+            this.waypointMarkers.push(marker);
+        });
     }
 }

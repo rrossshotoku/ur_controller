@@ -11,6 +11,8 @@ class App {
         this.wsClient = null;
         this.trajectoryPanel = null;
         this.jogController = null;
+        this.popupWindow = null;
+        this.popupReady = false;
 
         this.init();
     }
@@ -22,7 +24,8 @@ class App {
 
         // Initialize trajectory panel
         this.trajectoryPanel = new TrajectoryPanel({
-            onPathUpdate: (path) => this.updateTrajectoryPath(path)
+            onPathUpdate: (path) => this.updateTrajectoryPath(path),
+            onWaypointsUpdate: (waypoints) => this.updateWaypoints(waypoints)
         });
         // Expose for inline event handlers
         window.trajectoryPanel = this.trajectoryPanel;
@@ -39,6 +42,22 @@ class App {
         // Set up button handlers
         this.setupButtonHandlers();
 
+        // Listen for messages from popup window
+        window.addEventListener('message', (event) => {
+            if (event.origin !== window.location.origin) return;
+            const data = event.data;
+            if (!data || !data.type) return;
+
+            if (data.type === 'popupReady') {
+                this.popupReady = true;
+                console.log('Popup viewer ready');
+            } else if (data.type === 'popupClosed') {
+                this.popupWindow = null;
+                this.popupReady = false;
+                console.log('Popup viewer closed');
+            }
+        });
+
         // Connect WebSocket
         this.wsClient.connect();
     }
@@ -47,11 +66,20 @@ class App {
         if (this.robotViewer && this.robotViewer.updateTrajectoryPath) {
             this.robotViewer.updateTrajectoryPath(path);
         }
+        this.sendToPopup('trajectoryPath', { path });
+    }
+
+    updateWaypoints(waypoints) {
+        if (this.robotViewer && this.robotViewer.updateWaypoints) {
+            this.robotViewer.updateWaypoints(waypoints);
+        }
+        this.sendToPopup('waypoints', { waypoints });
     }
 
     setupButtonHandlers() {
         const btnStop = document.getElementById('btn-stop');
         const btnReconnect = document.getElementById('btn-reconnect');
+        const btnPopout = document.getElementById('btn-popout-viewer');
 
         btnStop.addEventListener('click', () => {
             this.sendStop();
@@ -60,6 +88,40 @@ class App {
         btnReconnect.addEventListener('click', () => {
             this.reconnectToRobot();
         });
+
+        if (btnPopout) {
+            btnPopout.addEventListener('click', () => {
+                this.openPopupViewer();
+            });
+        }
+    }
+
+    openPopupViewer() {
+        // Close existing popup if open
+        if (this.popupWindow && !this.popupWindow.closed) {
+            this.popupWindow.focus();
+            return;
+        }
+
+        // Open new popup window
+        const width = 800;
+        const height = 600;
+        const left = window.screenX + 100;
+        const top = window.screenY + 100;
+
+        this.popupWindow = window.open(
+            '/robot-viewer-popup.html',
+            'RobotViewer',
+            `width=${width},height=${height},left=${left},top=${top},resizable=yes`
+        );
+
+        this.popupReady = false;
+    }
+
+    sendToPopup(type, data) {
+        if (this.popupWindow && !this.popupWindow.closed && this.popupReady) {
+            this.popupWindow.postMessage({ type, ...data }, window.location.origin);
+        }
     }
 
     async reconnectToRobot() {
@@ -116,11 +178,13 @@ class App {
         // Update 3D viewer
         if (this.robotViewer && state.joints) {
             this.robotViewer.updateJoints(state.joints);
+            this.sendToPopup('joints', { joints: state.joints });
         }
 
         // Update TCP axes in 3D viewer
         if (this.robotViewer && state.tcp_pose) {
             this.robotViewer.updateTcpPose(state.tcp_pose);
+            this.sendToPopup('tcpPose', { tcpPose: state.tcp_pose });
         }
 
         // Update joint value displays
@@ -186,10 +250,27 @@ class App {
             statusEl.classList.remove('disconnected');
             statusEl.classList.add('connected');
             statusText.textContent = 'Connected';
+
+            // Auto-enable control when WebSocket connects
+            this.tryEnableControl();
         } else {
             statusEl.classList.remove('connected');
             statusEl.classList.add('disconnected');
             statusText.textContent = 'Disconnected';
+        }
+    }
+
+    async tryEnableControl() {
+        try {
+            const response = await fetch('/api/enable-control', { method: 'POST' });
+            const result = await response.json();
+            if (result.success) {
+                console.log('Control enabled automatically');
+            } else {
+                console.warn('Auto-enable control failed:', result.message);
+            }
+        } catch (err) {
+            console.warn('Auto-enable control error:', err);
         }
     }
 

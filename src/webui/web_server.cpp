@@ -99,6 +99,21 @@ void WebServer::setupRoutes() {
         return resp;
     });
 
+    // Serve robot viewer popup
+    CROW_ROUTE(app_, "/robot-viewer-popup.html")
+    ([this]() {
+        std::string path = config_.static_path + "/robot-viewer-popup.html";
+        std::ifstream file(path);
+        if (!file.is_open()) {
+            return crow::response(404, "robot-viewer-popup.html not found");
+        }
+        std::stringstream buffer;
+        buffer << file.rdbuf();
+        auto resp = crow::response(buffer.str());
+        resp.set_header("Content-Type", "text/html");
+        return resp;
+    });
+
     // Serve CSS files
     CROW_ROUTE(app_, "/css/<string>")
     ([this](const std::string& filename) {
@@ -1012,6 +1027,7 @@ void WebServer::setupTrajectoryRoutes() {
         result["method"] = trajectory::ikMethodToString(method);
         return crow::response(result);
     });
+
 }
 
 void WebServer::startStateUpdateThread() {

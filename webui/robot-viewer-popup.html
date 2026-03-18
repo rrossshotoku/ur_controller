@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>UR Controller - Robot View</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            background-color: #1a1a2e;
+            overflow: hidden;
+        }
+        #robot-viewer {
+            width: 100vw;
+            height: 100vh;
+        }
+    </style>
+</head>
+<body>
+    <div id="robot-viewer"></div>
+
+    <!-- Three.js and URDF loader from CDN -->
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+            "three/examples/jsm/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+        }
+    }
+    </script>
+
+    <script type="module">
+        import { RobotViewer } from '/js/robot-viewer.js';
+
+        class PopupViewer {
+            constructor() {
+                this.robotViewer = null;
+                this.init();
+            }
+
+            init() {
+                // Initialize 3D viewer
+                const viewerContainer = document.getElementById('robot-viewer');
+                this.robotViewer = new RobotViewer(viewerContainer);
+
+                // Listen for messages from parent window
+                window.addEventListener('message', (event) => {
+                    if (event.origin !== window.location.origin) return;
+
+                    const data = event.data;
+                    if (!data || !data.type) return;
+
+                    switch (data.type) {
+                        case 'joints':
+                            this.robotViewer.updateJoints(data.joints);
+                            break;
+                        case 'tcpPose':
+                            this.robotViewer.updateTcpPose(data.tcpPose);
+                            break;
+                        case 'trajectoryPath':
+                            this.robotViewer.updateTrajectoryPath(data.path);
+                            break;
+                        case 'waypoints':
+                            this.robotViewer.updateWaypoints(data.waypoints);
+                            break;
+                    }
+                });
+
+                // Notify parent that we're ready
+                if (window.opener) {
+                    window.opener.postMessage({ type: 'popupReady' }, window.location.origin);
+                }
+
+                // Handle window close
+                window.addEventListener('beforeunload', () => {
+                    if (window.opener) {
+                        window.opener.postMessage({ type: 'popupClosed' }, window.location.origin);
+                    }
+                });
+            }
+        }
+
+        // Start the popup viewer
+        window.addEventListener('DOMContentLoaded', () => {
+            new PopupViewer();
+        });
+    </script>
+</body>
+</html>

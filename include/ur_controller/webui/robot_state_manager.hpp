@@ -16,6 +16,13 @@
 namespace ur_controller {
 namespace webui {
 
+/// @brief Active control mode for the robot
+enum class ControlMode {
+    Idle,       ///< No active control
+    Jogging,    ///< speedL/speedJ active (TCP/joint jogging)
+    Trajectory  ///< servoJ active (trajectory execution)
+};
+
 /// @brief Thread-safe robot state container
 struct RobotState {
     std::array<double, 6> joint_positions{};
@@ -129,11 +136,25 @@ public:
     /// @brief Get robot IP address
     [[nodiscard]] const std::string& robotIp() const { return robot_ip_; }
 
+    /// @brief Acquire control for a specific mode
+    /// @param mode The control mode to acquire
+    /// @return true if control was acquired (or already in that mode)
+    /// @details If another mode is active, it will be stopped first
+    bool acquireControl(ControlMode mode);
+
+    /// @brief Release control (return to Idle mode)
+    /// @return true if control was released successfully
+    bool releaseControl();
+
+    /// @brief Get current control mode
+    [[nodiscard]] ControlMode getControlMode() const;
+
 private:
     std::string robot_ip_;
     mutable std::mutex state_mutex_;
     mutable std::mutex control_mutex_;
     RobotState current_state_;
+    ControlMode control_mode_{ControlMode::Idle};
 
     std::unique_ptr<ur_rtde::RTDEReceiveInterface> rtde_receive_;
     std::unique_ptr<ur_rtde::RTDEControlInterface> rtde_control_;

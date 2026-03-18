@@ -1,5 +1,11 @@
 # UR Controller - Project Guidelines
 
+## Interaction Preferences
+
+- **Questions (ending with ?)**: Answer the question but don't make code changes unless explicitly asked. Explain, investigate, or discuss - but wait for confirmation before modifying files.
+
+---
+
 ## Project Overview
 
 C++ application for controlling Universal Robots manipulators via RTDE. Runs on Raspberry Pi with real-time constraints. Features time-parameterised Cartesian trajectories, collision monitoring, and trajectory blending.

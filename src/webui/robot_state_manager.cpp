@@ -160,6 +160,11 @@ bool RobotStateManager::servoJ(const std::array<double, 6>& target_q,
     }
 
     try {
+        // Switch to trajectory mode if needed
+        if (control_mode_ != ControlMode::Trajectory) {
+            control_mode_ = ControlMode::Trajectory;
+        }
+
         std::vector<double> q(target_q.begin(), target_q.end());
         // servoJ(q, velocity, acceleration, time, lookahead_time, gain)
         rtde_control_->servoJ(q, 0, 0, 0.008, lookahead_time, gain);
@@ -195,7 +200,18 @@ bool RobotStateManager::speedL(const std::array<double, 6>& tcp_velocity,
         return false;
     }
 
+    // Don't interrupt trajectory - trajectory takes priority
+    // User must stop trajectory before jogging
+    if (control_mode_ == ControlMode::Trajectory) {
+        return false;
+    }
+
     try {
+        // Switch to jogging mode if needed
+        if (control_mode_ != ControlMode::Jogging) {
+            control_mode_ = ControlMode::Jogging;
+        }
+
         std::vector<double> vel(tcp_velocity.begin(), tcp_velocity.end());
         // time parameter: how long to apply velocity (0 = until new command)
         // Using a small positive time ensures smooth motion when streaming
@@ -216,7 +232,18 @@ bool RobotStateManager::speedJ(const std::array<double, 6>& joint_velocity,
         return false;
     }
 
+    // Don't interrupt trajectory - trajectory takes priority
+    // User must stop trajectory before jogging
+    if (control_mode_ == ControlMode::Trajectory) {
+        return false;
+    }
+
     try {
+        // Switch to jogging mode if needed
+        if (control_mode_ != ControlMode::Jogging) {
+            control_mode_ = ControlMode::Jogging;
+        }
+
         std::vector<double> vel(joint_velocity.begin(), joint_velocity.end());
         rtde_control_->speedJ(vel, acceleration, time);
         return true;
@@ -228,6 +255,11 @@ bool RobotStateManager::speedJ(const std::array<double, 6>& joint_velocity,
 
 bool RobotStateManager::stopL(double deceleration) {
     std::lock_guard<std::mutex> lock(control_mutex_);
+
+    // Don't send stopL during trajectory - would conflict with servoJ
+    if (control_mode_ == ControlMode::Trajectory) {
+        return false;
+    }
 
     if (!rtde_control_) {
         return false;
@@ -245,16 +277,24 @@ bool RobotStateManager::stopL(double deceleration) {
 bool RobotStateManager::speedStop() {
     std::lock_guard<std::mutex> lock(control_mutex_);
 
+    // Don't send speedStop during trajectory - would conflict with servoJ
+    if (control_mode_ == ControlMode::Trajectory) {
+        return false;
+    }
+
     if (!rtde_control_) {
+        control_mode_ = ControlMode::Idle;
         return false;
     }
 
     try {
         // Stop linear motion - use speedStop which is designed for speedL
         rtde_control_->speedStop();
+        control_mode_ = ControlMode::Idle;
         return true;
     } catch (const std::exception& e) {
         spdlog::error("speedStop failed: {}", e.what());
+        control_mode_ = ControlMode::Idle;
         return false;
     }
 }
@@ -263,15 +303,18 @@ bool RobotStateManager::servoStop() {
     std::lock_guard<std::mutex> lock(control_mutex_);
 
     if (!rtde_control_) {
+        control_mode_ = ControlMode::Idle;
         return false;
     }
 
     try {
         // Stop servo mode - use servoStop which is designed for servoJ
         rtde_control_->servoStop();
+        control_mode_ = ControlMode::Idle;
         return true;
     } catch (const std::exception& e) {
         spdlog::error("servoStop failed: {}", e.what());
+        control_mode_ = ControlMode::Idle;
         return false;
     }
 }
@@ -351,6 +394,69 @@ int64_t RobotStateManager::getCurrentTimeMs() const {
     auto now = std::chrono::system_clock::now();
     auto duration = now.time_since_epoch();
     return std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
+}
+
+bool RobotStateManager::acquireControl(ControlMode mode) {
+    std::lock_guard<std::mutex> lock(control_mutex_);
+
+    if (!rtde_control_) {
+        return false;
+    }
+
+    // Already in requested mode
+    if (control_mode_ == mode) {
+        return true;
+    }
+
+    // Stop current mode before switching
+    try {
+        if (control_mode_ == ControlMode::Jogging) {
+            spdlog::info("Stopping jog mode to switch to {}",
+                mode == ControlMode::Trajectory ? "trajectory" : "idle");
+            rtde_control_->speedStop();
+        } else if (control_mode_ == ControlMode::Trajectory) {
+            spdlog::info("Stopping trajectory mode to switch to {}",
+                mode == ControlMode::Jogging ? "jogging" : "idle");
+            rtde_control_->servoStop();
+        }
+
+        control_mode_ = mode;
+        return true;
+
+    } catch (const std::exception& e) {
+        spdlog::error("Failed to switch control mode: {}", e.what());
+        return false;
+    }
+}
+
+bool RobotStateManager::releaseControl() {
+    std::lock_guard<std::mutex> lock(control_mutex_);
+
+    if (!rtde_control_) {
+        control_mode_ = ControlMode::Idle;
+        return true;
+    }
+
+    try {
+        if (control_mode_ == ControlMode::Jogging) {
+            rtde_control_->speedStop();
+        } else if (control_mode_ == ControlMode::Trajectory) {
+            rtde_control_->servoStop();
+        }
+
+        control_mode_ = ControlMode::Idle;
+        return true;
+
+    } catch (const std::exception& e) {
+        spdlog::error("Failed to release control: {}", e.what());
+        control_mode_ = ControlMode::Idle;  // Reset anyway
+        return false;
+    }
+}
+
+ControlMode RobotStateManager::getControlMode() const {
+    std::lock_guard<std::mutex> lock(control_mutex_);
+    return control_mode_;
 }
 
 }  // namespace webui

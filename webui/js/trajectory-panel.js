@@ -3,10 +3,12 @@
 export class TrajectoryPanel {
     constructor(options = {}) {
         this.onPathUpdate = options.onPathUpdate || (() => {});
+        this.onWaypointsUpdate = options.onWaypointsUpdate || (() => {});
         this.elements = [];  // Array of {type: 'setup_pose'|'sequence', data: ...}
         this.plannedTrajectory = null;
         this.executionInterval = null;
         this.timingChart = null;
+        this.kinematics = null;  // Will be set when we get FK data
 
         this.init();
     }
@@ -198,12 +200,14 @@ export class TrajectoryPanel {
                 type: 'setup_pose',
                 name: `Setup ${this.elements.length + 1}`,
                 joints: data.joints,
+                position: data.position,  // Also capture TCP position for visualization
                 move_time: 0  // Auto
             };
 
             this.elements.push(setupPose);
             this.renderElements();
             this.updateButtons();
+            this.notifyWaypointsChanged();
         } catch (err) {
             console.error('Failed to add setup pose:', err);
         }
@@ -247,12 +251,14 @@ export class TrajectoryPanel {
                     type: 'sequence',
                     name: `Sequence ${this.elements.length + 1}`,
                     entry_joints: data.joints,  // Capture current joints as entry config
+                    entry_position: data.position,  // Capture entry position for visualization
                     waypoints: [waypoint]
                 });
             }
 
             this.renderElements();
             this.updateButtons();
+            this.notifyWaypointsChanged();
         } catch (err) {
             console.error('Failed to add sequence waypoint:', err);
         }
@@ -264,6 +270,7 @@ export class TrajectoryPanel {
         this.renderElements();
         this.updateButtons();
         this.clearVisualization();
+        this.notifyWaypointsChanged();
     }
 
     removeElement(index) {
@@ -271,6 +278,7 @@ export class TrajectoryPanel {
         this.plannedTrajectory = null;
         this.renderElements();
         this.updateButtons();
+        this.notifyWaypointsChanged();
     }
 
     removeWaypointFromSequence(elemIndex, wpIndex) {
@@ -284,6 +292,7 @@ export class TrajectoryPanel {
             this.plannedTrajectory = null;
             this.renderElements();
             this.updateButtons();
+            this.notifyWaypointsChanged();
         }
     }
 
@@ -427,6 +436,44 @@ export class TrajectoryPanel {
 
         if (btnPlan) btnPlan.disabled = !hasContent;
         if (btnExecute) btnExecute.disabled = !this.plannedTrajectory || !this.plannedTrajectory.valid;
+    }
+
+    // Notify robot viewer of waypoint changes for 3D visualization
+    notifyWaypointsChanged() {
+        const waypoints = [];
+        let waypointIndex = 1;
+
+        this.elements.forEach((elem, elemIndex) => {
+            if (elem.type === 'setup_pose' && elem.position) {
+                // Setup pose - show as orange marker
+                waypoints.push({
+                    type: 'setup_pose',
+                    position: elem.position,
+                    label: `S${elemIndex + 1}`
+                });
+            } else if (elem.type === 'sequence') {
+                // Entry point - show as blue marker
+                if (elem.entry_position) {
+                    waypoints.push({
+                        type: 'sequence',
+                        isEntry: true,
+                        position: elem.entry_position,
+                        label: `E${elemIndex + 1}`
+                    });
+                }
+                // Sequence waypoints - show as pink markers
+                elem.waypoints.forEach((wp, wpIndex) => {
+                    waypoints.push({
+                        type: 'sequence',
+                        isEntry: false,
+                        position: wp.position,
+                        label: `WP${waypointIndex++}`
+                    });
+                });
+            }
+        });
+
+        this.onWaypointsUpdate(waypoints);
     }
 
     async planTrajectory() {
