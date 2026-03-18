@@ -38,6 +38,61 @@ double smoothStep(double t) {
     return t * t * (3.0 - 2.0 * t);
 }
 
+/// @brief Cubic Hermite path interpolation with velocity constraints
+///
+/// Computes path parameter u(tau) such that:
+/// - u(0) = 0, u(1) = 1
+/// - u'(0) = entry_rate (normalized entry velocity = T * v_entry / D)
+/// - u'(1) = exit_rate (normalized exit velocity = T * v_exit / D)
+///
+/// This gives S-curve velocity profile that transitions smoothly from
+/// entry_velocity to exit_velocity over the segment duration.
+///
+/// @param tau Normalized time [0, 1]
+/// @param entry_rate Normalized entry velocity (T * v_entry / distance)
+/// @param exit_rate Normalized exit velocity (T * v_exit / distance)
+/// @return Path parameter u in [0, 1]
+double cubicHermitePath(double tau, double entry_rate, double exit_rate) {
+    tau = std::clamp(tau, 0.0, 1.0);
+    double tau2 = tau * tau;
+    double tau3 = tau2 * tau;
+
+    // Cubic Hermite interpolation satisfying boundary conditions:
+    // u(0) = 0, u(1) = 1, u'(0) = entry_rate, u'(1) = exit_rate
+    return tau3 * (-2.0 + entry_rate + exit_rate)
+         + tau2 * (3.0 - 2.0 * entry_rate - exit_rate)
+         + tau * entry_rate;
+}
+
+/// @brief Compute required entry velocity given distance, duration, and exit velocity
+///
+/// For a cubic Hermite profile, the average velocity equals (v_entry + v_exit) / 2.
+/// Given: distance = average_velocity * duration
+/// Therefore: v_entry = 2 * distance / duration - v_exit
+///
+/// @param distance Path distance in meters
+/// @param duration Segment duration in seconds
+/// @param exit_velocity Required exit velocity in m/s
+/// @param max_velocity Maximum allowed velocity in m/s
+/// @return Required entry velocity (clamped to [0, max_velocity])
+double computeEntryVelocity(double distance, double duration, double exit_velocity, double max_velocity) {
+    if (duration <= 0.0) return 0.0;
+
+    double v_entry = 2.0 * distance / duration - exit_velocity;
+
+    // Clamp to valid range
+    if (v_entry < 0.0) {
+        // Can't achieve - would need negative velocity
+        // This means we need to extend duration
+        v_entry = 0.0;
+    }
+    if (v_entry > max_velocity) {
+        v_entry = max_velocity;
+    }
+
+    return v_entry;
+}
+
 }  // namespace
 
 // =============================================================================
@@ -316,43 +371,221 @@ PlannedTrajectory TrajectoryPlanner::plan(
 }
 
 std::vector<TrajectorySample> TrajectoryPlanner::planJointMotion(
-    const std::vector<Segment>& segments,
+    const std::vector<Segment>& segments_in,
     const std::vector<Waypoint>& waypoints) {
 
     std::vector<TrajectorySample> samples;
 
-    if (segments.empty()) {
+    if (segments_in.empty()) {
         return samples;
     }
 
+    // =========================================================================
+    // Phase 1: Build extended segments with distances and blend arcs
+    // =========================================================================
+
+    // Extended segment info for velocity planning
+    struct ExtendedSegment {
+        size_t start_index;
+        size_t end_index;
+        JointVector start_joints;
+        double duration;
+        double distance;           // Path distance in meters
+        double entry_velocity;     // TCP velocity at segment start (m/s)
+        double exit_velocity;      // TCP velocity at segment end (m/s)
+        bool has_blend_out;        // Whether this segment ends with a blend
+        bool coming_from_blend;    // Whether this segment starts from a blend midpoint
+        std::optional<BlendArcInfo> blend_arc;
+        std::optional<BlendArcInfo> prev_blend_arc;  // Arc from previous segment (for second half)
+        Eigen::Isometry3d start_pose;
+        Eigen::Isometry3d end_pose;
+    };
+
+    std::vector<ExtendedSegment> ext_segments;
+    ext_segments.reserve(segments_in.size());
+
+    JointVector current_joints = segments_in[0].start_joints;
+    bool coming_from_blend = false;
+    JointVector blend_end_joints = JointVector::Zero();
+    std::optional<BlendArcInfo> prev_blend_arc;
+
+    for (size_t seg_idx = 0; seg_idx < segments_in.size(); ++seg_idx) {
+        const auto& seg = segments_in[seg_idx];
+
+        ExtendedSegment ext;
+        ext.start_index = seg.start_index;
+        ext.end_index = seg.end_index;
+        ext.start_joints = coming_from_blend ? blend_end_joints : current_joints;
+        ext.duration = seg.duration;
+        ext.coming_from_blend = coming_from_blend;
+        ext.prev_blend_arc = prev_blend_arc;
+
+        // Check if this segment needs a blend arc at the end
+        bool needs_blend = (waypoints[seg.end_index].blend_factor > 0.0) &&
+                           (seg_idx + 1 < segments_in.size()) &&
+                           (waypoints[seg.end_index].pause_time <= 0.0);
+
+        ext.has_blend_out = needs_blend;
+        ext.start_pose = kinematics_.forward(ext.start_joints);
+        ext.end_pose = waypoints[seg.end_index].toPose();
+
+        // Compute blend geometry if needed
+        if (needs_blend) {
+            ext.blend_arc = computeBlendGeometry(
+                waypoints[seg.start_index],
+                waypoints[seg.end_index],
+                waypoints[seg.end_index + 1],
+                ext.start_joints);
+        }
+
+        // Compute path distance
+        if (ext.blend_arc.has_value()) {
+            // First half segment: linear to arc_start + half arc
+            const auto& arc = *ext.blend_arc;
+            double linear_dist = (arc.arc_start - ext.start_pose.translation()).norm();
+            double half_arc = arc.arc_length / 2.0;
+            ext.distance = linear_dist + half_arc;
+
+            // Auto-calculate duration if not specified
+            if (ext.duration <= 0.0) {
+                ext.duration = ext.distance / config_.max_linear_velocity;
+                ext.duration = std::max(ext.duration, 0.1);
+            }
+
+            // Set up for next segment to start from arc midpoint
+            // Compute midpoint position
+            double half_angle = arc.arc_angle / 2.0;
+            Eigen::Vector3d v_start = arc.arc_start - arc.center;
+            Eigen::Vector3d v_mid =
+                v_start * std::cos(half_angle) +
+                arc.normal.cross(v_start) * std::sin(half_angle) +
+                arc.normal * arc.normal.dot(v_start) * (1 - std::cos(half_angle));
+
+            // Solve IK for arc midpoint to get blend_end_joints
+            Eigen::Isometry3d mid_pose = Eigen::Isometry3d::Identity();
+            mid_pose.translation() = arc.center + v_mid;
+            Eigen::Quaterniond mid_quat = arc.start_orientation.slerp(0.5, arc.end_orientation);
+            mid_pose.linear() = mid_quat.toRotationMatrix();
+
+            auto mid_ik = solveIK(mid_pose, arc.start_joints);
+            if (mid_ik.has_value()) {
+                blend_end_joints = *mid_ik;
+            } else {
+                blend_end_joints = arc.start_joints;  // Fallback
+            }
+
+            coming_from_blend = true;
+            prev_blend_arc = ext.blend_arc;
+        } else if (coming_from_blend && prev_blend_arc.has_value()) {
+            // Second half segment: half arc + linear to endpoint
+            const auto& arc = *prev_blend_arc;
+            double half_arc = arc.arc_length / 2.0;
+            double linear_dist = (ext.end_pose.translation() - arc.arc_end).norm();
+            ext.distance = half_arc + linear_dist;
+
+            if (ext.duration <= 0.0) {
+                ext.duration = ext.distance / config_.max_linear_velocity;
+                ext.duration = std::max(ext.duration, 0.1);
+            }
+
+            coming_from_blend = false;
+            prev_blend_arc = std::nullopt;
+            current_joints = seg.end_joints;  // Use pre-computed end joints
+        } else {
+            // Normal linear segment
+            ext.distance = (ext.end_pose.translation() - ext.start_pose.translation()).norm();
+
+            if (ext.duration <= 0.0) {
+                ext.duration = ext.distance / config_.max_linear_velocity;
+                ext.duration = std::max(ext.duration, 0.1);
+            }
+
+            coming_from_blend = false;
+            current_joints = seg.end_joints;
+        }
+
+        ext_segments.push_back(ext);
+    }
+
+    // =========================================================================
+    // Phase 2: Backward velocity propagation
+    // =========================================================================
+    // Work backwards to compute required entry velocities
+    // - At blend points: exit velocity = entry velocity of next segment
+    // - At waypoints without blend: exit velocity = 0
+    // - v_entry = 2 * distance / duration - v_exit
+
+    double max_velocity = config_.max_linear_velocity;
+
+    // Last segment always ends at velocity 0
+    ext_segments.back().exit_velocity = 0.0;
+
+    // Backward pass
+    for (int i = static_cast<int>(ext_segments.size()) - 1; i >= 0; --i) {
+        auto& seg = ext_segments[static_cast<size_t>(i)];
+
+        // Exit velocity already set from next segment (or 0 for last)
+        // Compute required entry velocity
+        double v_entry = computeEntryVelocity(seg.distance, seg.duration, seg.exit_velocity, max_velocity);
+
+        // Check if this is achievable
+        if (v_entry <= 0.0 && seg.distance > 0.001) {
+            // Can't achieve - need to extend duration
+            // With v_entry = 0 and v_exit, minimum duration = 2 * distance / v_exit
+            // But if v_exit is also 0, we need non-zero average velocity
+            if (seg.exit_velocity > 0.001) {
+                double min_duration = 2.0 * seg.distance / seg.exit_velocity;
+                seg.duration = std::max(seg.duration, min_duration + 0.01);
+                v_entry = computeEntryVelocity(seg.distance, seg.duration, seg.exit_velocity, max_velocity);
+            } else {
+                // Both velocities would be 0 - use trapezoidal profile assumption
+                v_entry = max_velocity * 0.5;  // Start at half max, will decelerate
+                double min_duration = seg.distance / (v_entry * 0.5);  // Average velocity
+                seg.duration = std::max(seg.duration, min_duration);
+            }
+        }
+
+        seg.entry_velocity = v_entry;
+
+        spdlog::info("Velocity plan segment {}: dist={:.3f}m, T={:.2f}s, v_entry={:.3f}, v_exit={:.3f}",
+            i, seg.distance, seg.duration, seg.entry_velocity, seg.exit_velocity);
+
+        // Propagate to previous segment if blending
+        if (i > 0) {
+            auto& prev_seg = ext_segments[static_cast<size_t>(i - 1)];
+            if (prev_seg.has_blend_out) {
+                // Previous segment ends with blend - its exit velocity matches our entry
+                prev_seg.exit_velocity = seg.entry_velocity;
+            } else {
+                // Previous segment ends at waypoint - exit velocity is 0
+                prev_seg.exit_velocity = 0.0;
+            }
+        }
+    }
+
+    // =========================================================================
+    // Phase 3: Forward sampling pass
+    // =========================================================================
+
     // Reserve approximate number of samples
     double total_time = 0.0;
-    for (const auto& seg : segments) {
+    for (const auto& seg : ext_segments) {
         total_time += seg.duration;
     }
-    // Add pause times
     for (const auto& wp : waypoints) {
         total_time += wp.pause_time;
     }
     size_t estimated_samples = static_cast<size_t>(total_time * config_.sample_rate) + 100;
     samples.reserve(estimated_samples);
 
-    // Process each segment
     double current_time = 0.0;
-    JointVector current_pos = segments[0].start_joints;
-    JointVector current_vel = JointVector::Zero();
-    JointVector current_acc = JointVector::Zero();
+    JointVector current_pos = ext_segments[0].start_joints;
 
-    // Track if we're coming from a blend arc (affects start position of next segment)
-    bool coming_from_blend = false;
-    JointVector blend_end_joints = JointVector::Zero();
-    std::optional<BlendArcInfo> prev_blend_arc;  // Arc info from previous segment for second half
-
-    for (size_t seg_idx = 0; seg_idx < segments.size(); ++seg_idx) {
-        const auto& seg = segments[seg_idx];
+    for (size_t seg_idx = 0; seg_idx < ext_segments.size(); ++seg_idx) {
+        const auto& seg = ext_segments[seg_idx];
 
         // Handle pause at start of segment (except first)
-        if (seg_idx > 0 && waypoints[seg.start_index].pause_time > 0.0 && !coming_from_blend) {
+        if (seg_idx > 0 && waypoints[seg.start_index].pause_time > 0.0 && !seg.coming_from_blend) {
             double pause_duration = waypoints[seg.start_index].pause_time;
             double pause_end = current_time + pause_duration;
 
@@ -360,165 +593,86 @@ std::vector<TrajectorySample> TrajectoryPlanner::planJointMotion(
                 samples.push_back(createSample(current_time, current_pos, JointVector::Zero()));
                 current_time += 1.0 / config_.sample_rate;
             }
-            current_vel = JointVector::Zero();
-            current_acc = JointVector::Zero();
         }
 
-        // Determine actual start and end positions
-        // If coming from a blend, start from blend arc end instead of waypoint
-        // Use actual joints from previous segment, not pre-computed start_joints
-        JointVector actual_start = coming_from_blend ? blend_end_joints : current_pos;
+        JointVector actual_start = seg.start_joints;
 
-        // Check if this segment needs a blend arc at the end
-        // Compute blend geometry on-the-fly using actual current joints
-        bool needs_blend = (waypoints[seg.end_index].blend_factor > 0.0) &&
-                           (seg_idx + 1 < segments.size()) &&
-                           (waypoints[seg.end_index].pause_time <= 0.0);
+        if (seg.blend_arc.has_value()) {
+            // Plan first half of arc segment
+            const auto& arc = *seg.blend_arc;
 
-        std::optional<BlendArcInfo> blend_arc;
-        if (needs_blend) {
-            // Compute blend geometry using actual current joints
-            blend_arc = computeBlendGeometry(
-                waypoints[seg.start_index],
-                waypoints[seg.end_index],
-                waypoints[seg.end_index + 1],
-                actual_start);
-        }
-
-        if (blend_arc.has_value()) {
-            const auto& arc = *blend_arc;
-
-            // Plan segment 1: linear portion + first half of arc (unified, evenly spaced)
-            Eigen::Isometry3d start_pose = kinematics_.forward(actual_start);
-
-            // Use segment duration for the combined path
-            double segment_duration = seg.duration;
-            if (segment_duration <= 0.0) {
-                // Auto-calculate based on distance and max velocity
-                Eigen::Vector3d start_pos = start_pose.translation();
-                double linear_distance = (arc.arc_start - start_pos).norm();
-                double half_arc_length = arc.arc_length / 2.0;
-                segment_duration = (linear_distance + half_arc_length) / config_.max_linear_velocity;
-                segment_duration = std::max(segment_duration, 0.1);
-            }
-
-            spdlog::info("Blend segment: duration={:.2f}, arc_length={:.3f}",
-                segment_duration, arc.arc_length);
+            spdlog::info("Sampling blend segment {}: duration={:.2f}, v_entry={:.3f}, v_exit={:.3f}",
+                seg_idx, seg.duration, seg.entry_velocity, seg.exit_velocity);
 
             auto segment_samples = planSegmentWithHalfArc(
-                start_pose, actual_start, arc,
-                current_time, segment_duration,
-                true);  // first_half = true
+                seg.start_pose, actual_start, arc,
+                current_time, seg.duration,
+                true,  // first_half = true
+                seg.entry_velocity,
+                seg.exit_velocity);
 
-            // Check for planning failure
             if (segment_samples.empty()) {
-                spdlog::error("Failed to plan segment {} (blend arc entry) - linear path not achievable",
-                    seg_idx);
-                return {};  // Return empty to signal failure
+                spdlog::error("Failed to plan segment {} (blend arc entry)", seg_idx);
+                return {};
             }
 
-            // Append samples
             for (const auto& sample : segment_samples) {
                 samples.push_back(sample);
             }
 
             current_time = segment_samples.back().time + 1.0 / config_.sample_rate;
             current_pos = segment_samples.back().joints;
-            current_vel = JointVector::Zero();
-            current_acc = JointVector::Zero();
 
-            // Mark that the next segment should continue from arc midpoint
-            coming_from_blend = true;
-            blend_end_joints = current_pos;  // Joints at arc midpoint
-            prev_blend_arc = arc;  // Store arc info for next segment's second half
+        } else if (seg.coming_from_blend && seg.prev_blend_arc.has_value()) {
+            // Plan second half of arc + linear
+            const auto& arc = *seg.prev_blend_arc;
 
-        } else {
-            // No blend arc at end - plan to the waypoint
-            // Get end pose from waypoint directly (NOT from pre-computed joints)
-            Eigen::Isometry3d end_pose = waypoints[seg.end_index].toPose();
-            Eigen::Vector3d end_pos = end_pose.translation();
+            spdlog::info("Sampling post-blend segment {}: duration={:.2f}, v_entry={:.3f}, v_exit={:.3f}",
+                seg_idx, seg.duration, seg.entry_velocity, seg.exit_velocity);
 
-            spdlog::info("Segment {}: target pos=[{:.4f}, {:.4f}, {:.4f}]",
-                seg_idx, end_pos.x(), end_pos.y(), end_pos.z());
+            auto segment_samples = planSegmentWithHalfArc(
+                seg.start_pose, actual_start, arc,
+                current_time, seg.duration,
+                false,  // first_half = false (second half)
+                seg.entry_velocity,
+                seg.exit_velocity,
+                seg.end_pose);
 
-            if (coming_from_blend && prev_blend_arc.has_value()) {
-                // Coming from a blend: plan second half of arc + linear to waypoint
-                const auto& arc = *prev_blend_arc;
-
-                // Segment duration covers: second half of arc + linear portion
-                double segment_duration = seg.duration;
-                if (segment_duration <= 0.0) {
-                    // Auto-calculate
-                    double half_arc_length = arc.arc_length / 2.0;
-                    double linear_distance = (end_pos - arc.arc_end).norm();
-                    segment_duration = (half_arc_length + linear_distance) / config_.max_linear_velocity;
-                    segment_duration = std::max(segment_duration, 0.1);
-                }
-
-                spdlog::info("Post-blend segment: duration={:.2f}", segment_duration);
-
-                // Start from arc midpoint (stored in actual_start/blend_end_joints)
-                Eigen::Isometry3d start_pose = kinematics_.forward(actual_start);
-
-                auto segment_samples = planSegmentWithHalfArc(
-                    start_pose, actual_start, arc,
-                    current_time, segment_duration,
-                    false,  // first_half = false (second half of arc)
-                    end_pose);
-
-                // Check for planning failure
-                if (segment_samples.empty()) {
-                    spdlog::error("Failed to plan segment {} (blend arc exit) - linear path not achievable",
-                        seg_idx);
-                    return {};  // Return empty to signal failure
-                }
-
-                // Append segment samples
-                for (const auto& sample : segment_samples) {
-                    samples.push_back(sample);
-                }
-
-                current_time = segment_samples.back().time + 1.0 / config_.sample_rate;
-                current_pos = segment_samples.back().joints;  // Use actual computed joints
-                current_vel = JointVector::Zero();
-                current_acc = JointVector::Zero();
-
-                prev_blend_arc = std::nullopt;
-            } else {
-                // Normal segment - just plan linear to waypoint
-                Eigen::Isometry3d start_pose = kinematics_.forward(actual_start);
-
-                double segment_duration = seg.duration;
-                if (segment_duration <= 0.0) {
-                    double linear_distance = (end_pos - start_pose.translation()).norm();
-                    segment_duration = linear_distance / config_.max_linear_velocity;
-                    segment_duration = std::max(segment_duration, 0.1);
-                }
-
-                auto segment_samples = planSegmentLinearCartesian(
-                    start_pose, end_pose,
-                    actual_start,
-                    current_time, segment_duration,
-                    false);  // S-curve to decelerate at end
-
-                // Check for planning failure
-                if (segment_samples.empty()) {
-                    spdlog::error("Failed to plan segment {} - linear path not achievable", seg_idx);
-                    return {};  // Return empty to signal failure
-                }
-
-                // Append segment samples
-                for (const auto& sample : segment_samples) {
-                    samples.push_back(sample);
-                }
-
-                current_time = segment_samples.back().time + 1.0 / config_.sample_rate;
-                current_pos = segment_samples.back().joints;  // Use actual computed joints
-                current_vel = JointVector::Zero();
-                current_acc = JointVector::Zero();
+            if (segment_samples.empty()) {
+                spdlog::error("Failed to plan segment {} (blend arc exit)", seg_idx);
+                return {};
             }
 
-            coming_from_blend = false;
+            for (const auto& sample : segment_samples) {
+                samples.push_back(sample);
+            }
+
+            current_time = segment_samples.back().time + 1.0 / config_.sample_rate;
+            current_pos = segment_samples.back().joints;
+
+        } else {
+            // Normal linear segment
+            spdlog::info("Sampling linear segment {}: duration={:.2f}, v_entry={:.3f}, v_exit={:.3f}",
+                seg_idx, seg.duration, seg.entry_velocity, seg.exit_velocity);
+
+            auto segment_samples = planSegmentLinearCartesian(
+                seg.start_pose, seg.end_pose,
+                actual_start,
+                current_time, seg.duration,
+                seg.entry_velocity,
+                seg.exit_velocity);
+
+            if (segment_samples.empty()) {
+                spdlog::error("Failed to plan segment {} - linear path not achievable", seg_idx);
+                return {};
+            }
+
+            for (const auto& sample : segment_samples) {
+                samples.push_back(sample);
+            }
+
+            current_time = segment_samples.back().time + 1.0 / config_.sample_rate;
+            current_pos = segment_samples.back().joints;
         }
     }
 
@@ -663,7 +817,8 @@ std::vector<TrajectorySample> TrajectoryPlanner::planSegmentLinearCartesian(
     const JointVector& start_joints,
     double start_time,
     double duration,
-    bool constant_velocity) {
+    double entry_velocity,
+    double exit_velocity) {
 
     std::vector<TrajectorySample> samples;
 
@@ -671,16 +826,20 @@ std::vector<TrajectorySample> TrajectoryPlanner::planSegmentLinearCartesian(
         duration = 1.0;  // Default to 1 second if not specified
     }
 
-    // Log the segment planning
-    Eigen::Vector3d dbg_end_pos = end_pose.translation();
-    spdlog::info("planSegmentLinearCartesian: start J6={:.1f}°, end_pos=[{:.4f}, {:.4f}, {:.4f}]",
-        start_joints[5] * 180.0 / M_PI,
-        dbg_end_pos.x(), dbg_end_pos.y(), dbg_end_pos.z());
-
     // Extract positions
     Eigen::Vector3d start_pos = start_pose.translation();
     Eigen::Vector3d end_pos = end_pose.translation();
     Eigen::Vector3d pos_diff = end_pos - start_pos;
+    double distance = pos_diff.norm();
+
+    // Log the segment planning
+    spdlog::info("planSegmentLinearCartesian: distance={:.4f}m, duration={:.2f}s, v_entry={:.3f}, v_exit={:.3f}",
+        distance, duration, entry_velocity, exit_velocity);
+
+    // Compute normalized velocity rates for cubic Hermite interpolation
+    // entry_rate = T * v_entry / D, exit_rate = T * v_exit / D
+    double entry_rate = (distance > 0.001) ? (duration * entry_velocity / distance) : 0.0;
+    double exit_rate = (distance > 0.001) ? (duration * exit_velocity / distance) : 0.0;
 
     // Extract orientations as quaternions
     Eigen::Quaterniond start_quat(start_pose.rotation());
@@ -700,13 +859,12 @@ std::vector<TrajectorySample> TrajectoryPlanner::planSegmentLinearCartesian(
     JointVector prev_joints = start_joints;
 
     for (int i = 0; i < num_samples; ++i) {
-        double t = static_cast<double>(i) / (num_samples - 1);
-        double sample_time = start_time + t * duration;
+        double tau = static_cast<double>(i) / (num_samples - 1);
+        double sample_time = start_time + tau * duration;
 
-        // Choose velocity profile:
-        // - constant_velocity=true: linear interpolation (for blending into arcs)
-        // - constant_velocity=false: S-curve with accel/decel (for stopping at waypoints)
-        double s = constant_velocity ? t : smoothStep(t);
+        // Use cubic Hermite interpolation for S-curve velocity profile
+        // This smoothly transitions from entry_velocity to exit_velocity
+        double s = cubicHermitePath(tau, entry_rate, exit_rate);
 
         // Interpolate position linearly (with S-curve timing)
         Eigen::Vector3d pos = start_pos + s * pos_diff;
@@ -725,9 +883,9 @@ std::vector<TrajectorySample> TrajectoryPlanner::planSegmentLinearCartesian(
             // Numerical IK seeds from previous joints
             auto ik_solution = kinematics_.inverseNumerical(pose, prev_joints);
             if (!ik_solution.has_value()) {
-                spdlog::error("Linear path unreachable at t={:.3f}, pos=[{:.3f}, {:.3f}, {:.3f}] - "
+                spdlog::error("Linear path unreachable at tau={:.3f}, pos=[{:.3f}, {:.3f}, {:.3f}] - "
                     "numerical IK failed",
-                    t, pos.x(), pos.y(), pos.z());
+                    tau, pos.x(), pos.y(), pos.z());
                 return {};
             }
             joints = *ik_solution;
@@ -735,9 +893,9 @@ std::vector<TrajectorySample> TrajectoryPlanner::planSegmentLinearCartesian(
             // Analytical IK: get all solutions and pick closest to previous
             auto solutions = kinematics_.inverse(pose);
             if (solutions.empty()) {
-                spdlog::error("Linear path unreachable at t={:.3f}, pos=[{:.3f}, {:.3f}, {:.3f}] - "
+                spdlog::error("Linear path unreachable at tau={:.3f}, pos=[{:.3f}, {:.3f}, {:.3f}] - "
                     "no IK solution found",
-                    t, pos.x(), pos.y(), pos.z());
+                    tau, pos.x(), pos.y(), pos.z());
                 return {};
             }
 
@@ -761,8 +919,8 @@ std::vector<TrajectorySample> TrajectoryPlanner::planSegmentLinearCartesian(
 
         // Log J6 at first and last sample
         if (i == 0 || i == num_samples - 1) {
-            spdlog::info("  Sample {} (t={:.2f}): J6={:.1f}°",
-                i, t, joints[5] * 180.0 / M_PI);
+            spdlog::info("  Sample {} (tau={:.2f}): J6={:.1f}°",
+                i, tau, joints[5] * 180.0 / M_PI);
         }
 
         // Check for singularity (large joint velocity indicates singularity proximity)
@@ -776,9 +934,9 @@ std::vector<TrajectorySample> TrajectoryPlanner::planSegmentLinearCartesian(
             // If joint delta is very large, we're near a singularity - log warning but continue
             double joint_velocity = max_joint_delta / sample_period;
             if (joint_velocity > config_.max_joint_velocity * 2.0) {
-                spdlog::warn("Near singularity at t={:.3f}, pos=[{:.3f}, {:.3f}, {:.3f}] - "
+                spdlog::warn("Near singularity at tau={:.3f}, pos=[{:.3f}, {:.3f}, {:.3f}] - "
                     "joint velocity {:.1f} rad/s exceeds limit. Consider slower motion.",
-                    t, pos.x(), pos.y(), pos.z(), joint_velocity);
+                    tau, pos.x(), pos.y(), pos.z(), joint_velocity);
             }
         }
 
@@ -805,6 +963,8 @@ std::vector<TrajectorySample> TrajectoryPlanner::planSegmentWithHalfArc(
     double start_time,
     double duration,
     bool first_half,
+    double entry_velocity,
+    double exit_velocity,
     const Eigen::Isometry3d& end_pose) {
 
     std::vector<TrajectorySample> samples;
@@ -852,6 +1012,13 @@ std::vector<TrajectorySample> TrajectoryPlanner::planSegmentWithHalfArc(
 
     double total_distance = linear_distance + half_arc_length;
 
+    // Compute normalized velocity rates for cubic Hermite interpolation
+    double entry_rate = (total_distance > 0.001) ? (duration * entry_velocity / total_distance) : 0.0;
+    double exit_rate = (total_distance > 0.001) ? (duration * exit_velocity / total_distance) : 0.0;
+
+    spdlog::info("planSegmentWithHalfArc: first_half={}, dist={:.4f}m, v_entry={:.3f}, v_exit={:.3f}",
+        first_half, total_distance, entry_velocity, exit_velocity);
+
     // Ensure shortest path for SLERP
     if (linear_start_quat.dot(linear_end_quat) < 0.0) {
         linear_end_quat.coeffs() = -linear_end_quat.coeffs();
@@ -870,11 +1037,14 @@ std::vector<TrajectorySample> TrajectoryPlanner::planSegmentWithHalfArc(
     JointVector prev_joints = start_joints;
 
     for (int i = 0; i < num_samples; ++i) {
-        double t = static_cast<double>(i) / (num_samples - 1);
-        double sample_time = start_time + t * duration;
+        double tau = static_cast<double>(i) / (num_samples - 1);
+        double sample_time = start_time + tau * duration;
 
-        // Distance along the combined path
-        double dist_along_path = t * total_distance;
+        // Use cubic Hermite interpolation for S-curve velocity profile
+        double s = cubicHermitePath(tau, entry_rate, exit_rate);
+
+        // Distance along the combined path (with S-curve timing)
+        double dist_along_path = s * total_distance;
 
         Eigen::Vector3d pos;
         Eigen::Quaterniond quat;
@@ -937,9 +1107,9 @@ std::vector<TrajectorySample> TrajectoryPlanner::planSegmentWithHalfArc(
         // Use prev_joints as seed for continuous motion
         auto ik_solution = solveIK(sample_pose, prev_joints);
         if (!ik_solution.has_value()) {
-            spdlog::error("Blend path unreachable at t={:.3f}, pos=[{:.3f}, {:.3f}, {:.3f}] - "
+            spdlog::error("Blend path unreachable at tau={:.3f}, pos=[{:.3f}, {:.3f}, {:.3f}] - "
                 "no IK solution found",
-                t, pos.x(), pos.y(), pos.z());
+                tau, pos.x(), pos.y(), pos.z());
             return {};
         }
         JointVector joints = *ik_solution;

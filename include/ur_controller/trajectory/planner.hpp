@@ -160,6 +160,9 @@ private:
         JointVector end_joints;
         double duration{0.0};
         double start_time{0.0};
+        double distance{0.0};           ///< Path distance in meters
+        double entry_velocity{0.0};     ///< TCP velocity at segment start (m/s)
+        double exit_velocity{0.0};      ///< TCP velocity at segment end (m/s)
         bool has_blend_in{false};
         bool has_blend_out{false};
         std::optional<BlendArcInfo> blend_arc;  ///< Blend arc at end of segment
@@ -238,13 +241,16 @@ private:
     /// Each IK solution is unwrapped relative to the previous sample,
     /// so joint angles accumulate naturally without discontinuities.
     ///
+    /// Uses cubic Hermite interpolation for S-curve velocity profile that
+    /// transitions from entry_velocity to exit_velocity.
+    ///
     /// @param start_pose Starting TCP pose
     /// @param end_pose Ending TCP pose
     /// @param start_joints Joint configuration at start (angles may be outside ±π)
     /// @param start_time Trajectory time at segment start
     /// @param duration Segment duration in seconds
-    /// @param constant_velocity If true, use constant velocity (for blending).
-    ///                          If false, use S-curve with accel/decel (for stopping).
+    /// @param entry_velocity TCP velocity at segment start (m/s)
+    /// @param exit_velocity TCP velocity at segment end (m/s)
     /// @return Trajectory samples with linear TCP path
     [[nodiscard]] std::vector<TrajectorySample> planSegmentLinearCartesian(
         const Eigen::Isometry3d& start_pose,
@@ -252,12 +258,14 @@ private:
         const JointVector& start_joints,
         double start_time,
         double duration,
-        bool constant_velocity = false);
+        double entry_velocity,
+        double exit_velocity);
 
     /// @brief Plan a segment with linear portion + half blend arc (unified sampling)
     ///
     /// Samples the linear portion and first/second half of the arc as one
-    /// continuous path with evenly spaced samples at constant velocity.
+    /// continuous path with S-curve velocity profile transitioning from
+    /// entry_velocity to exit_velocity.
     ///
     /// @param start_pose Starting TCP pose
     /// @param start_joints Joint configuration at start
@@ -266,6 +274,8 @@ private:
     /// @param duration Total segment duration
     /// @param first_half If true, plan linear + first half of arc.
     ///                   If false, plan second half of arc + linear to end.
+    /// @param entry_velocity TCP velocity at segment start (m/s)
+    /// @param exit_velocity TCP velocity at segment end (m/s)
     /// @param end_pose End pose (used when first_half=false)
     /// @return Trajectory samples with evenly spaced points
     [[nodiscard]] std::vector<TrajectorySample> planSegmentWithHalfArc(
@@ -275,6 +285,8 @@ private:
         double start_time,
         double duration,
         bool first_half,
+        double entry_velocity,
+        double exit_velocity,
         const Eigen::Isometry3d& end_pose = Eigen::Isometry3d::Identity());
 
     /// @brief Solve IK using the configured method
