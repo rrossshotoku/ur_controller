@@ -38,172 +38,6 @@ double smoothStep(double t) {
     return t * t * (3.0 - 2.0 * t);
 }
 
-/// @brief Per-joint maximum allowed change for continuous motion (radians)
-/// J1, J2, J3, J5 are "configuration" joints - large changes indicate arm reconfiguration
-/// J4, J6 are "free spin" joints - can rotate freely to orient wrist/tool
-constexpr std::array<double, 6> kMaxJointChange = {
-    1.57,  // J1 (base): ~90° - large change means reaching around
-    1.57,  // J2 (shoulder): ~90° - large change affects overall arm pose
-    2.09,  // J3 (elbow): ~120° - elbow flip is ~180°
-    3.14,  // J4 (wrist 1): ~180° - free rotation, allow full spin
-    1.57,  // J5 (wrist 2): ~90° - wrist flip is ~180°
-    3.14   // J6 (flange): ~180° - free rotation, allow full spin
-};
-
-/// @brief Find an IK solution that can be reached with continuous joint motion
-/// @param solutions All IK solutions for the target pose
-/// @param previous Previous joint positions
-/// @return The closest solution within per-joint thresholds, or nullopt
-///
-/// This function uses per-joint thresholds to detect configuration changes.
-/// "Free spin" joints (J4, J6) allow large rotations for wrist/tool orientation.
-/// "Configuration" joints (J1, J2, J3, J5) have stricter limits to catch real flips.
-std::optional<JointVector> findContinuousSolution(
-    const std::vector<JointVector>& solutions,
-    const JointVector& previous) {
-
-    if (solutions.empty()) {
-        return std::nullopt;
-    }
-
-    // Find the solution with minimum total joint motion that respects per-joint limits
-    std::optional<JointVector> best;
-    double best_total_dist = std::numeric_limits<double>::max();
-
-    for (const auto& sol : solutions) {
-        bool within_limits = true;
-        double total_dist = 0.0;
-
-        for (int j = 0; j < 6; ++j) {
-            double diff = std::abs(wrapAngle(sol[j] - previous[j]));
-            total_dist += diff * diff;
-
-            // Check against per-joint threshold
-            if (diff > kMaxJointChange[static_cast<size_t>(j)]) {
-                within_limits = false;
-                break;
-            }
-        }
-
-        // Only consider solutions within per-joint limits
-        if (within_limits) {
-            // Among valid solutions, prefer the one with smallest total motion
-            if (!best.has_value() || total_dist < best_total_dist) {
-                best = sol;
-                best_total_dist = total_dist;
-            }
-        }
-    }
-
-    return best;
-}
-
-/// @brief Check if a configuration is viable along a linear path between two poses
-/// @param start_pos Start position
-/// @param end_pos End position
-/// @param orientation Orientation to use (typically from start waypoint)
-/// @param config Configuration to test
-/// @param kinematics Kinematics instance
-/// @param num_samples Number of points to sample along path
-/// @return true if configuration is viable for entire path
-bool isConfigViableAlongPath(
-    const Eigen::Vector3d& start_pos,
-    const Eigen::Vector3d& end_pos,
-    const Eigen::Quaterniond& orientation,
-    const kinematics::ArmConfiguration& config,
-    const kinematics::URKinematics& kinematics,
-    int num_samples = 10) {
-
-    for (int i = 0; i <= num_samples; ++i) {
-        double t = static_cast<double>(i) / num_samples;
-        Eigen::Vector3d pos = start_pos + t * (end_pos - start_pos);
-
-        Eigen::Isometry3d pose = Eigen::Isometry3d::Identity();
-        pose.translation() = pos;
-        pose.linear() = orientation.toRotationMatrix();
-
-        auto solutions = kinematics.inverse(pose);
-        auto same_config = kinematics.filterByConfiguration(solutions, config);
-
-        if (same_config.empty()) {
-            return false;  // No solution in this configuration at this point
-        }
-    }
-    return true;
-}
-
-/// @brief Find a configuration that is viable for the entire trajectory
-/// @param waypoints The waypoints to plan through
-/// @param kinematics Kinematics instance
-/// @return Pair of (viable_start_joints, viable_config), or nullopt if none found
-std::optional<std::pair<JointVector, kinematics::ArmConfiguration>> findViableConfiguration(
-    const std::vector<Waypoint>& waypoints,
-    const kinematics::URKinematics& kinematics) {
-
-    if (waypoints.empty()) {
-        return std::nullopt;
-    }
-
-    // Get all IK solutions for first waypoint
-    auto first_pose = waypoints[0].toPose();
-    auto first_solutions = kinematics.inverse(first_pose);
-    if (first_solutions.empty()) {
-        return std::nullopt;
-    }
-
-    // Get unique configurations from first waypoint solutions
-    std::vector<std::pair<kinematics::ArmConfiguration, JointVector>> configs_to_try;
-    for (const auto& sol : first_solutions) {
-        auto config = kinematics.getConfiguration(sol);
-        // Check if we already have this configuration
-        bool already_have = false;
-        for (const auto& [existing_config, _] : configs_to_try) {
-            if (existing_config == config) {
-                already_have = true;
-                break;
-            }
-        }
-        if (!already_have) {
-            configs_to_try.emplace_back(config, sol);
-        }
-    }
-
-    spdlog::info("Testing {} unique configurations for viability", configs_to_try.size());
-
-    // Test each configuration against all segments
-    for (const auto& [config, start_joints] : configs_to_try) {
-        bool config_viable = true;
-
-        // Check each segment
-        for (size_t i = 0; i + 1 < waypoints.size() && config_viable; ++i) {
-            const auto& wp_start = waypoints[i];
-            const auto& wp_end = waypoints[i + 1];
-
-            // Use the orientation from the starting waypoint for consistency
-            if (!isConfigViableAlongPath(
-                    wp_start.position,
-                    wp_end.position,
-                    wp_start.orientation,
-                    config,
-                    kinematics,
-                    10)) {
-                config_viable = false;
-                spdlog::debug("Config (s={} e={} w={}) fails on segment {}",
-                    config.shoulder, config.elbow, config.wrist, i);
-            }
-        }
-
-        if (config_viable) {
-            spdlog::info("Found viable configuration: shoulder={} elbow={} wrist={}",
-                config.shoulder, config.elbow, config.wrist);
-            return std::make_pair(start_joints, config);
-        }
-    }
-
-    spdlog::warn("No single configuration is viable for entire trajectory");
-    return std::nullopt;
-}
-
 }  // namespace
 
 // =============================================================================
@@ -301,8 +135,10 @@ std::optional<JointVector> TrajectoryPlanner::solveIK(
             return std::nullopt;
         }
 
-        // Find continuous solution within per-joint thresholds
-        return findContinuousSolution(valid_solutions, seed);
+        // Select the closest solution to the seed (allow any joint motion)
+        // Discontinuity detection happens at the sample level during path planning
+        constexpr double kNoJumpLimit = 10.0;  // Effectively unlimited
+        return kinematics_.selectBestSolution(valid_solutions, seed, kNoJumpLimit);
     }
 }
 
@@ -319,58 +155,36 @@ PlannedTrajectory TrajectoryPlanner::plan(const std::vector<Waypoint>& waypoints
         return result;
     }
 
-    // Find a configuration that is viable for the entire trajectory
-    auto viable = findViableConfiguration(waypoints, kinematics_);
-    if (!viable.has_value()) {
-        // Fall back to checking just the first waypoint
-        auto pose = waypoints[0].toPose();
-        auto solutions = kinematics_.inverse(pose);
-        if (solutions.empty()) {
-            PlannedTrajectory result;
-            result.valid = false;
-            result.messages.push_back({ValidationSeverity::Error, "First waypoint is unreachable", 0, std::nullopt});
-            return result;
-        }
-
-        // No viable configuration for entire trajectory
+    // Get IK solutions for first waypoint
+    auto pose = waypoints[0].toPose();
+    auto solutions = kinematics_.inverse(pose);
+    if (solutions.empty()) {
         PlannedTrajectory result;
         result.valid = false;
-        result.messages.push_back({ValidationSeverity::Error,
-            "No arm configuration is viable for the entire trajectory. "
-            "The path crosses configuration boundaries that cannot be avoided. "
-            "Try repositioning waypoints to stay within one arm configuration.",
-            std::nullopt, std::nullopt});
+        result.messages.push_back({ValidationSeverity::Error, "First waypoint is unreachable", 0, std::nullopt});
         return result;
     }
 
-    auto [start_joints, viable_config] = *viable;
-
-    // Verify start joints are within limits
+    // Find a solution within joint limits
     const auto& limits = kinematics_.jointLimits();
-    if (!limits.withinLimits(start_joints)) {
-        // Try to find another solution in the same config that's within limits
-        auto pose = waypoints[0].toPose();
-        auto solutions = kinematics_.inverse(pose);
-        auto same_config_sols = kinematics_.filterByConfiguration(solutions, viable_config);
+    JointVector start_joints = solutions[0];
+    bool found_valid = false;
 
-        bool found_valid = false;
-        for (const auto& sol : same_config_sols) {
-            if (limits.withinLimits(sol)) {
-                start_joints = sol;
-                found_valid = true;
-                break;
-            }
-        }
-
-        if (!found_valid) {
-            PlannedTrajectory result;
-            result.valid = false;
-            result.messages.push_back({ValidationSeverity::Error,
-                "Viable configuration exists but all solutions exceed joint limits",
-                0, std::nullopt});
-            return result;
+    for (const auto& sol : solutions) {
+        if (limits.withinLimits(sol)) {
+            start_joints = sol;
+            found_valid = true;
+            break;
         }
     }
+
+    if (!found_valid) {
+        spdlog::warn("No IK solution within joint limits for first waypoint, using closest");
+    }
+
+    auto start_config = kinematics_.getConfiguration(start_joints);
+    spdlog::info("Starting trajectory planning with config: shoulder={} elbow={} wrist={}",
+        start_config.shoulder, start_config.elbow, start_config.wrist);
 
     return plan(waypoints, start_joints);
 }
@@ -460,11 +274,11 @@ PlannedTrajectory TrajectoryPlanner::plan(
         }
 
         // Check for blending
-        seg.has_blend_in = (i > 0 && waypoints[i].blend_radius > 0.0);
-        seg.has_blend_out = (waypoints[i + 1].blend_radius > 0.0 && i + 2 < waypoints.size());
+        seg.has_blend_in = (i > 0 && waypoints[i].blend_factor > 0.0);
+        seg.has_blend_out = (waypoints[i + 1].blend_factor > 0.0 && i + 2 < waypoints.size());
 
-        spdlog::info("Segment {}: has_blend_out={}, wp[{}].blend_radius={:.4f}, i+2<size={}",
-            i, seg.has_blend_out, i + 1, waypoints[i + 1].blend_radius, i + 2 < waypoints.size());
+        spdlog::info("Segment {}: has_blend_out={}, wp[{}].blend_factor={:.4f}, i+2<size={}",
+            i, seg.has_blend_out, i + 1, waypoints[i + 1].blend_factor, i + 2 < waypoints.size());
 
         // Compute blend arc geometry for the end waypoint if needed
         if (seg.has_blend_out) {
@@ -557,7 +371,7 @@ std::vector<TrajectorySample> TrajectoryPlanner::planJointMotion(
 
         // Check if this segment needs a blend arc at the end
         // Compute blend geometry on-the-fly using actual current joints
-        bool needs_blend = (waypoints[seg.end_index].blend_radius > 0.0) &&
+        bool needs_blend = (waypoints[seg.end_index].blend_factor > 0.0) &&
                            (seg_idx + 1 < segments.size()) &&
                            (waypoints[seg.end_index].pause_time <= 0.0);
 
@@ -1305,13 +1119,18 @@ std::optional<BlendArcInfo> TrajectoryPlanner::computeBlendGeometry(
     Eigen::Vector3d p_prev = prev_wp.position;
     Eigen::Vector3d p_blend = blend_wp.position;
     Eigen::Vector3d p_next = next_wp.position;
-    double blend_radius = blend_wp.blend_radius;
+    double blend_factor = blend_wp.blend_factor;
 
-    spdlog::info("computeBlendGeometry: blend_radius={:.4f}", blend_radius);
+    spdlog::info("computeBlendGeometry: blend_factor={:.4f}", blend_factor);
     spdlog::info("  prev=({:.3f},{:.3f},{:.3f}), blend=({:.3f},{:.3f},{:.3f}), next=({:.3f},{:.3f},{:.3f})",
         p_prev.x(), p_prev.y(), p_prev.z(),
         p_blend.x(), p_blend.y(), p_blend.z(),
         p_next.x(), p_next.y(), p_next.z());
+
+    if (blend_factor < 0.001) {
+        spdlog::info("  Blend factor too small ({:.4f}), skipping blend", blend_factor);
+        return std::nullopt;
+    }
 
     // Compute incoming and outgoing direction vectors
     Eigen::Vector3d dir_in = (p_blend - p_prev);
@@ -1322,26 +1141,13 @@ std::optional<BlendArcInfo> TrajectoryPlanner::computeBlendGeometry(
 
     spdlog::info("  dist_in={:.4f}, dist_out={:.4f}", dist_in, dist_out);
 
-    // Check if blend radius is feasible (not larger than half the segment lengths)
-    if (blend_radius > dist_in * 0.5 || blend_radius > dist_out * 0.5) {
-        // Blend radius too large - reduce it
-        double old_radius = blend_radius;
-        blend_radius = std::min(dist_in * 0.5, dist_out * 0.5);
-        spdlog::info("  Reduced blend_radius from {:.4f} to {:.4f}", old_radius, blend_radius);
-    }
-
-    if (blend_radius < 0.001) {
-        spdlog::warn("  Blend radius too small ({:.4f}), skipping blend", blend_radius);
-        return std::nullopt;  // Blend radius too small
-    }
-
     dir_in.normalize();
     dir_out.normalize();
 
     // Calculate the angle between incoming and outgoing directions
     double cos_angle = dir_in.dot(dir_out);
     cos_angle = std::clamp(cos_angle, -1.0, 1.0);
-    double angle = std::acos(cos_angle);  // Angle between directions
+    double angle = std::acos(cos_angle);  // Angle between directions (turning angle)
 
     spdlog::info("  Path angle={:.2f} degrees", angle * 180.0 / kPi);
 
@@ -1351,30 +1157,63 @@ std::optional<BlendArcInfo> TrajectoryPlanner::computeBlendGeometry(
         return std::nullopt;
     }
 
-    // Arc start and end points
+    // The arc angle is the supplement of the path angle
+    double arc_angle = kPi - angle;
+
+    spdlog::info("  arc_angle={:.2f} degrees", arc_angle * 180.0 / kPi);
+
+    // NEW BLEND_FACTOR APPROACH:
+    // blend_factor = distance from vertex to arc apex (along the bisector)
+    //
+    // Geometry:
+    // - arc_radius = geometric radius of the inscribed circle
+    // - The center is at distance (arc_radius / cos(angle/2)) from vertex along bisector
+    // - The arc apex (closest point to vertex) is at distance:
+    //   h = arc_radius / cos(angle/2) - arc_radius = arc_radius * (1 - cos(angle/2)) / cos(angle/2)
+    //
+    // Solving for arc_radius given blend_factor h:
+    //   arc_radius = h * cos(angle/2) / (1 - cos(angle/2))
+    //
+    // The tangent distance (blend_radius) is:
+    //   blend_radius = arc_radius * cos(angle/2)
+
+    double half_angle = angle / 2.0;
+    double cos_half = std::cos(half_angle);
+
+    if (cos_half > 0.999) {
+        // Nearly straight path, blend_factor would need huge arc
+        spdlog::warn("  Path too straight for blend (cos_half={:.4f})", cos_half);
+        return std::nullopt;
+    }
+
+    // Compute arc_radius from blend_factor
+    double arc_radius = blend_factor * cos_half / (1.0 - cos_half);
+
+    // Compute tangent distance (how far along each segment the arc starts/ends)
+    double blend_radius = arc_radius * cos_half;
+
+    spdlog::info("  Computed from blend_factor: arc_radius={:.4f}, blend_radius={:.4f}",
+        arc_radius, blend_radius);
+
+    // Check if blend_radius (tangent distance) exceeds half the segment lengths
+    double max_blend_radius = std::min(dist_in, dist_out) * 0.5;
+    if (blend_radius > max_blend_radius) {
+        // Need to clamp - recompute blend_factor from the max allowed blend_radius
+        double old_factor = blend_factor;
+        blend_radius = max_blend_radius;
+        arc_radius = blend_radius / cos_half;
+        blend_factor = arc_radius * (1.0 - cos_half) / cos_half;
+        spdlog::info("  Clamped: blend_factor {:.4f} -> {:.4f}, blend_radius={:.4f}",
+            old_factor, blend_factor, blend_radius);
+    }
+
+    // Arc start and end points (tangent points on each segment)
     Eigen::Vector3d arc_start = p_blend - blend_radius * dir_in;
     Eigen::Vector3d arc_end = p_blend + blend_radius * dir_out;
 
     spdlog::info("  arc_start=({:.3f},{:.3f},{:.3f}), arc_end=({:.3f},{:.3f},{:.3f})",
         arc_start.x(), arc_start.y(), arc_start.z(),
         arc_end.x(), arc_end.y(), arc_end.z());
-
-    // The arc angle is the supplement of the path angle
-    // (arc sweeps from incoming direction to outgoing direction)
-    double arc_angle = kPi - angle;
-
-    spdlog::info("  arc_angle={:.2f} degrees", arc_angle * 180.0 / kPi);
-
-    // Arc radius using geometry:
-    // The arc connects arc_start to arc_end, tangent to both directions
-    // Arc radius = blend_radius / sin(arc_angle/2)
-    double sin_half = std::sin(arc_angle / 2.0);
-    spdlog::info("  sin_half={:.4f}", sin_half);
-    if (std::abs(sin_half) < 0.001) {
-        spdlog::warn("  Degenerate arc (sin_half={:.4f}), skipping blend", sin_half);
-        return std::nullopt;  // Degenerate case
-    }
-    double arc_radius = blend_radius / sin_half;
 
     // Compute arc center using robust method:
     // The center must satisfy:
@@ -1695,7 +1534,7 @@ TrajectoryVisualization TrajectoryPlanner::generateVisualization(
         WaypointMarker marker;
         marker.index = i;
         marker.position = waypoints[i].position;
-        marker.blend_radius = waypoints[i].blend_radius;
+        marker.blend_factor = waypoints[i].blend_factor;
         marker.has_pause = waypoints[i].pause_time > 0.0;
 
         // Find approximate time when this waypoint is reached
@@ -1857,17 +1696,16 @@ PlannedTrajectory TrajectoryPlanner::planSequence(
         Waypoint wp;
         wp.position = sw.position;
         wp.orientation = sw.orientation;
-        wp.blend_radius = sw.blend_radius;
+        wp.blend_factor = sw.blend_factor;
         wp.segment_time = sw.segment_time;
         wp.pause_time = sw.pause_time;
         wp.joints = sw.joints;  // Copy saved joint configuration
         waypoints.push_back(wp);
     }
 
-    // Validate all waypoints can be reached with continuous joint motion
-    // This replaces strict configuration checking - we allow joints to cross
-    // arbitrary angular boundaries as long as the motion is smooth
-    JointVector current_joints = entry_joints;
+    // Validate all waypoints are reachable (have at least one IK solution)
+    // We no longer reject based on configuration - the actual path planning
+    // will use seeded IK to find smooth joint motion even across configuration boundaries
     for (size_t i = 0; i < waypoints.size(); ++i) {
         auto pose = waypoints[i].toPose();
         auto solutions = kinematics_.inverse(pose);
@@ -1880,34 +1718,13 @@ PlannedTrajectory TrajectoryPlanner::planSequence(
             return result;
         }
 
-        // Find a solution reachable with continuous motion (max ~120° per joint)
-        auto continuous_solution = findContinuousSolution(solutions, current_joints);
-
-        if (!continuous_solution.has_value()) {
-            // No continuous solution - this is a real reconfiguration
-            result.valid = false;
-            result.messages.push_back({ValidationSeverity::Error,
-                "Waypoint " + std::to_string(i + 1) + " requires arm reconfiguration "
-                "(large motion on J1/J2/J3/J5). "
-                "Add intermediate waypoints or a setup pose to create a smoother path.",
-                i, std::nullopt});
-            return result;
-        }
-
-        current_joints = *continuous_solution;
-
-        // Log if configuration changed (informational)
-        auto wp_config = kinematics_.getConfiguration(current_joints);
-        if (wp_config != entry_config) {
-            spdlog::info("WP{}: Config changed to shoulder={} elbow={} wrist={} (continuous motion OK)",
-                i + 1, wp_config.shoulder, wp_config.elbow, wp_config.wrist);
-        }
+        spdlog::info("WP{}: {} IK solutions available", i + 1, solutions.size());
     }
 
     // Build segments with endpoint IK pre-computation (for duration estimation)
     // The actual path IK is solved incrementally in planSegmentLinearCartesian
     std::vector<Segment> segments;
-    current_joints = entry_joints;
+    JointVector current_joints = entry_joints;
     double current_time = 0.0;
 
     for (size_t i = 0; i + 1 < waypoints.size(); ++i) {
@@ -1972,8 +1789,8 @@ PlannedTrajectory TrajectoryPlanner::planSequence(
         }
 
         // Check for blending
-        seg.has_blend_in = (i > 0 && waypoints[i].blend_radius > 0.0);
-        seg.has_blend_out = (waypoints[i + 1].blend_radius > 0.0 && i + 2 < waypoints.size());
+        seg.has_blend_in = (i > 0 && waypoints[i].blend_factor > 0.0);
+        seg.has_blend_out = (waypoints[i + 1].blend_factor > 0.0 && i + 2 < waypoints.size());
 
         // Blend arc geometry computed during planning with actual joints
         seg.blend_arc = std::nullopt;

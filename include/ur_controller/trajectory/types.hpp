@@ -59,7 +59,7 @@ struct SequenceWaypoint {
     Eigen::Vector3d position{0, 0, 0};          ///< XYZ position in meters (base frame)
     Eigen::Quaterniond orientation{1, 0, 0, 0}; ///< Orientation as quaternion
 
-    double blend_radius{0.0};   ///< Blend radius in meters (0 = stop at waypoint)
+    double blend_factor{0.0};   ///< Blend factor: distance from vertex to arc apex (0 = stop at waypoint)
     double segment_time{0.0};   ///< Time to reach this waypoint from previous (0 = auto)
     double pause_time{0.0};     ///< Time to pause at this waypoint
 
@@ -171,7 +171,7 @@ struct Waypoint {
     Eigen::Vector3d position{0, 0, 0};      ///< XYZ position in meters (base frame)
     Eigen::Quaterniond orientation{1, 0, 0, 0}; ///< Orientation as quaternion
 
-    double blend_radius{0.0};   ///< Blend radius in meters (0 = stop at waypoint)
+    double blend_factor{0.0};   ///< Blend factor: distance from vertex to arc apex (0 = stop at waypoint)
     double segment_time{0.0};   ///< Time to reach this waypoint from previous (0 = auto)
     double pause_time{0.0};     ///< Time to pause at this waypoint
 
@@ -199,7 +199,7 @@ struct Waypoint {
         SequenceWaypoint sw;
         sw.position = position;
         sw.orientation = orientation;
-        sw.blend_radius = blend_radius;
+        sw.blend_factor = blend_factor;
         sw.segment_time = segment_time;
         sw.pause_time = pause_time;
         sw.joints = joints;
@@ -329,7 +329,7 @@ struct WaypointMarker {
     size_t index;                   ///< Waypoint index
     Eigen::Vector3d position;       ///< XYZ position
     double time;                    ///< Time when reached
-    double blend_radius;            ///< Blend radius
+    double blend_factor;            ///< Blend factor (distance from vertex to arc apex)
     bool has_pause;                 ///< True if pause at this waypoint
 };
 

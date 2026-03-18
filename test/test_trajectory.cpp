@@ -1798,7 +1798,7 @@ TEST_CASE("Rectangular path should not require configuration change", "[trajecto
         SequenceWaypoint sw;
         sw.position = pos;
         sw.orientation = orientation;
-        sw.blend_radius = 0.0;
+        sw.blend_factor = 0.0;
         sw.segment_time = 2.0;
         sw.pause_time = 0.0;
         sequence.waypoints.push_back(sw);

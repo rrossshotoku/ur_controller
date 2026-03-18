@@ -239,11 +239,11 @@ WaypointValidation TrajectoryValidator::validateWaypoint(
         }
     }
 
-    // Validate blend radius if specified
-    if (waypoint.blend_radius < 0.0) {
+    // Validate blend factor if specified
+    if (waypoint.blend_factor < 0.0) {
         result.messages.push_back(
             makeMessage(ValidationSeverity::Error,
-                        "Blend radius cannot be negative"));
+                        "Blend factor cannot be negative"));
     }
 
     return result;

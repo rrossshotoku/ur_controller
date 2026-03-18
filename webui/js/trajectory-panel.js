@@ -231,7 +231,7 @@ export class TrajectoryPanel {
             const waypoint = {
                 position: data.position,
                 orientation: data.orientation || { w: 1, x: 0, y: 0, z: 0 },
-                blend_radius: 0.0,
+                blend_factor: 0.0,
                 segment_time: 0.0,
                 pause_time: 0.0,
                 joints: data.joints  // Save joint positions when waypoint is taught
@@ -393,9 +393,9 @@ export class TrajectoryPanel {
                     <div class="waypoint-params">
                         <div class="waypoint-param">
                             <label>Blend</label>
-                            <input type="number" class="waypoint-input" value="${wp.blend_radius}"
+                            <input type="number" class="waypoint-input" value="${wp.blend_factor}"
                                    step="0.01" min="0"
-                                   onchange="window.trajectoryPanel.updateWaypointParam(${elemIndex}, ${wpIndex}, 'blend_radius', this.value)">
+                                   onchange="window.trajectoryPanel.updateWaypointParam(${elemIndex}, ${wpIndex}, 'blend_factor', this.value)">
                         </div>
                         <div class="waypoint-param">
                             <label>Time</label>

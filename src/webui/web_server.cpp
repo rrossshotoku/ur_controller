@@ -506,8 +506,8 @@ void WebServer::setupTrajectoryRoutes() {
             }
 
             // Optional parameters
-            if (wp_json.has("blend_radius")) {
-                wp.blend_radius = wp_json["blend_radius"].d();
+            if (wp_json.has("blend_factor")) {
+                wp.blend_factor = wp_json["blend_factor"].d();
             }
             if (wp_json.has("segment_time")) {
                 wp.segment_time = wp_json["segment_time"].d();
@@ -615,7 +615,7 @@ void WebServer::setupTrajectoryRoutes() {
                 marker["y"] = viz.waypoints[i].position.y();
                 marker["z"] = viz.waypoints[i].position.z();
                 marker["time"] = viz.waypoints[i].time;
-                marker["blend_radius"] = viz.waypoints[i].blend_radius;
+                marker["blend_factor"] = viz.waypoints[i].blend_factor;
                 marker["has_pause"] = viz.waypoints[i].has_pause;
                 wp_markers[i] = std::move(marker);
             }
@@ -745,8 +745,8 @@ void WebServer::setupTrajectoryRoutes() {
                     }
 
                     // Optional parameters
-                    if (wp_json.has("blend_radius")) {
-                        wp.blend_radius = wp_json["blend_radius"].d();
+                    if (wp_json.has("blend_factor")) {
+                        wp.blend_factor = wp_json["blend_factor"].d();
                     }
                     if (wp_json.has("segment_time")) {
                         wp.segment_time = wp_json["segment_time"].d();

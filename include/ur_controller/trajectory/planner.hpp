@@ -38,7 +38,7 @@ struct BlendArcInfo {
 /// The planner takes a list of waypoints and generates a fully pre-computed
 /// trajectory that can be played back at 500 Hz. The trajectory includes:
 /// - Smooth joint-space motion using Ruckig
-/// - Blend arcs at waypoint corners (if blend_radius > 0)
+/// - Blend arcs at waypoint corners (if blend_factor > 0)
 /// - Pause times at waypoints
 /// - Validation of all waypoints and path segments
 ///
