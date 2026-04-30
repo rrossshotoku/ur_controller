@@ -114,13 +114,13 @@ std::array<Eigen::Isometry3d, 7> URKinematics::allLinkTransforms(
 
 Eigen::Vector3d URKinematics::wristCenter(
     const Eigen::Isometry3d& tcp_pose) const {
-    // Wrist center is d6 back from TCP along the approach vector (z-axis of TCP)
     Eigen::Vector3d z_tcp = tcp_pose.rotation().col(2);
     return tcp_pose.translation() - d6_ * z_tcp;
 }
 
-std::vector<JointVector> URKinematics::inverse(
-    const Eigen::Isometry3d& target) const {
+// Analytical IK has been removed - use inverseNumerical() instead.
+#if 0
+{
     std::vector<JointVector> solutions;
     solutions.reserve(8);
 
@@ -276,6 +276,7 @@ std::vector<JointVector> URKinematics::inverse(
 
     return solutions;
 }
+#endif
 
 std::optional<JointVector> URKinematics::inverseNumerical(
     const Eigen::Isometry3d& target,
@@ -357,6 +358,8 @@ std::optional<JointVector> URKinematics::inverseNumerical(
     return std::nullopt;
 }
 
+// Analytical-IK helpers removed - use inverseNumerical() directly.
+#if 0
 std::optional<JointVector> URKinematics::selectBestSolution(
     const std::vector<JointVector>& solutions,
     const JointVector& current_q,
@@ -413,6 +416,7 @@ std::optional<JointVector> URKinematics::selectBestSolution(
 
     return best;
 }
+#endif
 
 // -----------------------------------------------------------------------------
 // Configuration Tracking
@@ -445,6 +449,7 @@ ArmConfiguration URKinematics::getConfiguration(const JointVector& q) const {
     return config;
 }
 
+#if 0  // Removed: filterByConfiguration / selectBestSolutionSameConfig (analytical-only)
 std::vector<JointVector> URKinematics::filterByConfiguration(
     const std::vector<JointVector>& solutions,
     const ArmConfiguration& target_config) const {
@@ -502,6 +507,7 @@ std::optional<JointVector> URKinematics::selectBestSolutionSameConfig(
 
     return best;
 }
+#endif
 
 // -----------------------------------------------------------------------------
 // Jacobian

@@ -172,12 +172,43 @@
                         </div>
                     </div>
 
-                    <div class="ik-method-toggle">
-                        <span class="label">IK Method:</span>
-                        <div class="btn-group">
-                            <button id="btn-ik-analytical" class="btn btn-small active" title="Fast closed-form solution (up to 8 solutions)">Analytical</button>
-                            <button id="btn-ik-numerical" class="btn btn-small" title="Iterative damped least squares (follows seed)">Numerical</button>
+                    <div id="planning-method-section" class="config-section">
+                        <h3>Planning Method</h3>
+                        <div class="limit-row">
+                            <label for="planning-method">Method:</label>
+                            <select id="planning-method">
+                                <option value="geometric" selected>Geometric (arc blends + S-curve)</option>
+                                <option value="axis_blend">Axis blend (per-axis polyline)</option>
+                            </select>
                         </div>
+                        <p class="help-text">
+                            Geometric: blend_factor is metres (vertex→arc apex).<br>
+                            Axis blend: blend_factor is acceleration fraction f ∈ (0, 1].
+                            f = 1 ramps at the full configured acceleration; smaller f gives
+                            gentler corners. Defaults to 1 if unset.
+                        </p>
+                    </div>
+
+                    <div id="motion-limits" class="config-section">
+                        <h3>Motion Limits</h3>
+                        <div class="limits-grid">
+                            <div class="limit-row">
+                                <label for="limit-velocity">Max Velocity:</label>
+                                <input type="number" id="limit-velocity" step="0.1" min="0.01" max="2.0" value="0.5">
+                                <span class="unit">m/s</span>
+                            </div>
+                            <div class="limit-row">
+                                <label for="limit-acceleration">Max Acceleration:</label>
+                                <input type="number" id="limit-acceleration" step="0.1" min="0.1" max="5.0" value="1.0">
+                                <span class="unit">m/s²</span>
+                            </div>
+                            <div class="limit-row">
+                                <label for="limit-jerk">Max Jerk:</label>
+                                <input type="number" id="limit-jerk" step="1.0" min="1.0" max="50.0" value="5.0">
+                                <span class="unit">m/s³</span>
+                            </div>
+                        </div>
+                        <button id="btn-apply-limits" class="btn btn-small btn-secondary">Apply Limits</button>
                     </div>
 
                     <div id="trajectory-elements">
@@ -212,10 +243,31 @@
                 </div>
 
                 <div class="panel" id="timing-panel">
-                    <h2>Timing Graph</h2>
+                    <div class="panel-header" style="display: flex; justify-content: space-between; align-items: center;">
+                        <h2 style="margin: 0;">Velocity Profile</h2>
+                        <button id="btn-popout-chart" class="btn btn-small btn-secondary" title="Open in separate window">Pop Out</button>
+                    </div>
                     <div id="chart-container">
                         <canvas id="timing-chart"></canvas>
                     </div>
+                </div>
+            </div>
+
+            <!-- Terminal Panel -->
+            <div class="panel-container terminal-section">
+                <div class="panel" id="terminal-panel">
+                    <div class="panel-header">
+                        <h2>Terminal</h2>
+                        <div class="terminal-controls">
+                            <label class="checkbox-label">
+                                <input type="checkbox" id="terminal-autoscroll" checked>
+                                <span>Auto-scroll</span>
+                            </label>
+                            <button id="btn-clear-terminal" class="btn btn-small btn-secondary">Clear</button>
+                            <button id="btn-refresh-terminal" class="btn btn-small btn-secondary">Refresh</button>
+                        </div>
+                    </div>
+                    <div id="terminal-output"></div>
                 </div>
             </div>
         </main>
@@ -223,6 +275,7 @@
 
     <!-- Chart.js for timing graphs -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.0.1/dist/chartjs-plugin-annotation.min.js"></script>
 
     <!-- Three.js and URDF loader from CDN -->
     <script type="importmap">

@@ -208,39 +208,39 @@ struct Waypoint {
 };
 
 // =============================================================================
-// IK Method Selection
+// Trajectory Configuration
 // =============================================================================
 
-/// @brief Method for solving inverse kinematics during trajectory planning
-enum class IKMethod {
-    Analytical,     ///< Fast closed-form solution (up to 8 solutions)
-    Numerical       ///< Iterative damped least squares (follows seed)
+/// @brief Method used to plan a trajectory
+/// @details Selectable from the GUI; controls which planner backend is used
+/// when /api/trajectory/plan2 dispatches.
+enum class PlanningMethod {
+    Geometric,   ///< Inscribed-arc blends + S-curve along path length (legacy/default)
+    AxisBlend    ///< Per-axis polyline-with-blends in the time domain
 };
 
-/// @brief Convert IKMethod to string
-[[nodiscard]] inline const char* ikMethodToString(IKMethod method) {
-    switch (method) {
-        case IKMethod::Analytical: return "analytical";
-        case IKMethod::Numerical:  return "numerical";
-        default:                   return "unknown";
+/// @brief Convert PlanningMethod to string
+[[nodiscard]] inline const char* planningMethodToString(PlanningMethod m) {
+    switch (m) {
+        case PlanningMethod::Geometric:  return "geometric";
+        case PlanningMethod::AxisBlend:  return "axis_blend";
+        default:                          return "geometric";
     }
 }
 
-/// @brief Parse IKMethod from string
-[[nodiscard]] inline IKMethod ikMethodFromString(const std::string& str) {
-    if (str == "numerical") return IKMethod::Numerical;
-    return IKMethod::Analytical;  // Default to analytical
+/// @brief Parse PlanningMethod from string
+/// @return Geometric if string is unrecognized
+[[nodiscard]] inline PlanningMethod planningMethodFromString(const std::string& s) {
+    if (s == "axis_blend") return PlanningMethod::AxisBlend;
+    return PlanningMethod::Geometric;
 }
-
-// =============================================================================
-// Trajectory Configuration
-// =============================================================================
 
 /// @brief Configuration for trajectory planning
 struct TrajectoryConfig {
     // Cartesian limits
     double max_linear_velocity{0.5};        ///< m/s
     double max_linear_acceleration{1.0};    ///< m/s²
+    double max_linear_jerk{5.0};            ///< m/s³
     double max_angular_velocity{1.0};       ///< rad/s
     double max_angular_acceleration{2.0};   ///< rad/s²
 
@@ -253,8 +253,8 @@ struct TrajectoryConfig {
     double sample_rate{500.0};              ///< Hz (samples per second)
     double path_tolerance{0.001};           ///< meters (for blend arc computation)
 
-    // IK solver method
-    IKMethod ik_method{IKMethod::Analytical};   ///< IK solver to use
+    /// @brief Selected planner backend (default: Geometric)
+    PlanningMethod planning_method{PlanningMethod::Geometric};
 };
 
 // =============================================================================
@@ -346,6 +346,10 @@ struct TrajectoryVisualization {
     std::vector<double> times;          ///< Time values for graphs
     std::vector<double> speeds;         ///< TCP speed (m/s)
     std::vector<double> accelerations;  ///< TCP acceleration (m/s²)
+    std::vector<double> jerks;          ///< TCP jerk (m/s³)
+
+    // Segment boundaries for waypoint markers on graph
+    std::vector<double> segment_times;  ///< Time at each waypoint/segment boundary
 
     // Joint data (for optional joint-space visualization)
     std::vector<std::array<double, 6>> joint_positions;  ///< Joint angles over time

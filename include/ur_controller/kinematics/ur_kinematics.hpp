@@ -88,17 +88,6 @@ public:
     // Inverse Kinematics
     // -------------------------------------------------------------------------
 
-    /// @brief Compute all IK solutions for a target pose (analytical)
-    ///
-    /// Returns up to 8 joint configurations that reach the target TCP pose.
-    /// Solutions are not filtered by joint limits - use selectBestSolution()
-    /// for limit-aware selection.
-    ///
-    /// @param target Target TCP pose (homogeneous transform, base frame)
-    /// @return Vector of joint configurations (may be empty if unreachable)
-    [[nodiscard]] std::vector<JointVector> inverse(
-        const Eigen::Isometry3d& target) const;
-
     /// @brief Compute IK solution using numerical iteration (damped least squares)
     ///
     /// Iteratively converges to a solution starting from the seed configuration.
@@ -122,27 +111,6 @@ public:
         int max_iterations = 50,
         double tolerance = 1e-6) const;
 
-    /// @brief Select the best IK solution from candidates
-    ///
-    /// Filters solutions by joint limits and selects the one closest
-    /// to the current configuration, avoiding large joint jumps.
-    ///
-    /// @param solutions Candidate IK solutions
-    /// @param current_q Current joint configuration
-    /// @param max_joint_jump Maximum allowed change per joint (radians)
-    /// @return Best solution, or nullopt if none valid
-    [[nodiscard]] std::optional<JointVector> selectBestSolution(
-        const std::vector<JointVector>& solutions,
-        const JointVector& current_q,
-        double max_joint_jump = 0.5) const;
-
-    /// @brief Select best solution with custom limits
-    [[nodiscard]] std::optional<JointVector> selectBestSolution(
-        const std::vector<JointVector>& solutions,
-        const JointVector& current_q,
-        const JointLimits& limits,
-        double max_joint_jump = 0.5) const;
-
     // -------------------------------------------------------------------------
     // Configuration Tracking
     // -------------------------------------------------------------------------
@@ -158,27 +126,6 @@ public:
     /// @param q Joint angles
     /// @return Configuration indices
     [[nodiscard]] ArmConfiguration getConfiguration(const JointVector& q) const;
-
-    /// @brief Filter IK solutions to only those in the same configuration
-    ///
-    /// @param solutions All IK solutions
-    /// @param target_config Configuration to match
-    /// @return Solutions in the same configuration
-    [[nodiscard]] std::vector<JointVector> filterByConfiguration(
-        const std::vector<JointVector>& solutions,
-        const ArmConfiguration& target_config) const;
-
-    /// @brief Select best IK solution that maintains configuration
-    ///
-    /// Filters by configuration first, then selects closest to current.
-    /// Returns nullopt if no solution exists in the target configuration.
-    ///
-    /// @param solutions All IK solutions
-    /// @param current_q Current joint configuration
-    /// @return Best solution in same configuration, or nullopt
-    [[nodiscard]] std::optional<JointVector> selectBestSolutionSameConfig(
-        const std::vector<JointVector>& solutions,
-        const JointVector& current_q) const;
 
     // -------------------------------------------------------------------------
     // Jacobian and Singularities

@@ -167,39 +167,32 @@ WaypointValidation TrajectoryValidator::validateWaypoint(
     // Convert waypoint to pose
     Eigen::Isometry3d pose = waypoint.toPose();
 
-    // Get IK solutions
-    auto solutions = kinematics_.inverse(pose);
-    result.num_solutions = solutions.size();
+    // Numerical IK seeded from current joints (or joint-limit midpoint)
+    JointVector seed;
+    if (current_joints.has_value()) {
+        seed = *current_joints;
+    } else {
+        const auto& limits = kinematics_.jointLimits();
+        for (int i = 0; i < 6; ++i) {
+            const auto& jl = limits.joints[static_cast<size_t>(i)];
+            seed[i] = 0.5 * (jl.min + jl.max);
+        }
+    }
 
-    if (solutions.empty()) {
+    auto sol_opt = kinematics_.inverseNumerical(pose, seed);
+    result.num_solutions = sol_opt.has_value() ? 1 : 0;
+
+    if (!sol_opt.has_value()) {
         result.reachable = false;
         result.within_limits = false;
         result.messages.push_back(
             makeMessage(ValidationSeverity::Error,
-                        "Waypoint is outside robot reach (no IK solution)"));
+                        "Waypoint is outside robot reach (numerical IK failed)"));
         return result;
     }
 
     result.reachable = true;
-
-    // Select best solution
-    if (current_joints.has_value()) {
-        result.best_solution = kinematics_.selectBestSolution(
-            solutions, *current_joints, config_.max_joint_jump);
-    } else {
-        // No current joints - select first solution within limits
-        const auto& limits = kinematics_.jointLimits();
-        for (const auto& sol : solutions) {
-            if (limits.withinLimits(sol)) {
-                result.best_solution = sol;
-                break;
-            }
-        }
-        // If none within limits, take first solution anyway and flag warning
-        if (!result.best_solution.has_value() && !solutions.empty()) {
-            result.best_solution = solutions[0];
-        }
-    }
+    result.best_solution = sol_opt;
 
     if (!result.best_solution.has_value()) {
         result.within_limits = false;
@@ -268,35 +261,14 @@ PathValidation TrajectoryValidator::validateSegment(
     Eigen::Isometry3d start_pose = start.toPose();
     Eigen::Isometry3d end_pose = end.toPose();
 
-    // Get end joint configuration
-    auto end_solutions = kinematics_.inverse(end_pose);
-    if (end_solutions.empty()) {
+    // Get end joint configuration via numerical IK seeded from start joints
+    auto end_joints_opt = kinematics_.inverseNumerical(end_pose, start_joints);
+    if (!end_joints_opt.has_value()) {
         result.singularity_free = false;
         result.velocity_feasible = false;
         result.messages.push_back(
             makeMessage(ValidationSeverity::Error, "End pose unreachable"));
         return result;
-    }
-
-    auto end_joints_opt = kinematics_.selectBestSolution(
-        end_solutions, start_joints, config_.max_joint_jump);
-
-    if (!end_joints_opt.has_value()) {
-        result.velocity_feasible = false;
-        result.messages.push_back(
-            makeMessage(ValidationSeverity::Warning,
-                        "Large joint jump required for this segment"));
-        // Use closest solution for velocity estimation
-        double min_dist = std::numeric_limits<double>::max();
-        JointVector best_sol = end_solutions[0];
-        for (const auto& sol : end_solutions) {
-            double dist = (sol - start_joints).norm();
-            if (dist < min_dist) {
-                min_dist = dist;
-                best_sol = sol;
-            }
-        }
-        end_joints_opt = best_sol;
     }
 
     JointVector end_joints = *end_joints_opt;
@@ -336,21 +308,14 @@ PathValidation TrajectoryValidator::validateSegment(
             double t = static_cast<double>(i) / (num_samples - 1);
             Eigen::Isometry3d sample_pose = interpolatePose(start_pose, end_pose, t);
 
-            // Get IK for sampled pose
-            auto solutions = kinematics_.inverse(sample_pose);
-            if (solutions.empty()) {
+            // Numerical IK seeded from current joints for sampled pose
+            auto sample_joints_opt = kinematics_.inverseNumerical(sample_pose, current_joints);
+            if (!sample_joints_opt.has_value()) {
                 result.singularity_free = false;
                 result.messages.push_back(
                     makeMessage(ValidationSeverity::Warning,
                                 "Path passes through unreachable region"));
                 break;
-            }
-
-            auto sample_joints_opt = kinematics_.selectBestSolution(
-                solutions, current_joints, config_.max_joint_jump * 0.5);
-
-            if (!sample_joints_opt.has_value()) {
-                sample_joints_opt = solutions[0];  // Fallback
             }
 
             JointVector sample_joints = *sample_joints_opt;
@@ -387,8 +352,14 @@ PathValidation TrajectoryValidator::validateSegment(
 }
 
 bool TrajectoryValidator::isReachable(const Eigen::Isometry3d& pose) const {
-    auto solutions = kinematics_.inverse(pose);
-    return !solutions.empty();
+    // Numerical IK with joint-limit midpoint as a neutral seed
+    const auto& limits = kinematics_.jointLimits();
+    JointVector seed;
+    for (int i = 0; i < 6; ++i) {
+        const auto& jl = limits.joints[static_cast<size_t>(i)];
+        seed[i] = 0.5 * (jl.min + jl.max);
+    }
+    return kinematics_.inverseNumerical(pose, seed).has_value();
 }
 
 bool TrajectoryValidator::isSingularityFree(
@@ -404,16 +375,9 @@ bool TrajectoryValidator::isSingularityFree(
         double t = static_cast<double>(i) / (num_samples - 1);
         Eigen::Isometry3d pose = interpolatePose(start, end, t);
 
-        auto solutions = kinematics_.inverse(pose);
-        if (solutions.empty()) {
-            return false;
-        }
-
-        auto joints_opt = kinematics_.selectBestSolution(
-            solutions, current_joints, config_.max_joint_jump * 0.5);
-
+        auto joints_opt = kinematics_.inverseNumerical(pose, current_joints);
         if (!joints_opt.has_value()) {
-            joints_opt = solutions[0];
+            return false;
         }
 
         if (kinematics_.nearSingularity(*joints_opt, config_.singularity_threshold)) {

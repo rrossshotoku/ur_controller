@@ -4,6 +4,7 @@ import { RobotViewer } from './robot-viewer.js';
 import { WebSocketClient } from './websocket-client.js';
 import { TrajectoryPanel } from './trajectory-panel.js';
 import { JogController } from './jog-controller.js';
+import { TerminalController } from './terminal-controller.js';
 
 class App {
     constructor() {
@@ -11,6 +12,7 @@ class App {
         this.wsClient = null;
         this.trajectoryPanel = null;
         this.jogController = null;
+        this.terminalController = null;
         this.popupWindow = null;
         this.popupReady = false;
 
@@ -38,6 +40,9 @@ class App {
 
         // Initialize jog controller (needs wsClient)
         this.jogController = new JogController(this.wsClient);
+
+        // Initialize terminal controller
+        this.terminalController = new TerminalController();
 
         // Set up button handlers
         this.setupButtonHandlers();

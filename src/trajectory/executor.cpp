@@ -3,8 +3,11 @@
 
 #include "ur_controller/trajectory/executor.hpp"
 
+#include <spdlog/spdlog.h>
+
 #include <chrono>
 #include <algorithm>
+#include <cmath>
 
 namespace ur_controller {
 namespace trajectory {
@@ -36,6 +39,45 @@ bool TrajectoryExecutor::load(const PlannedTrajectory& trajectory) {
     trajectory_ = std::make_unique<PlannedTrajectory>(trajectory);
     current_time_ = 0.0;
     current_index_ = 0;
+
+    // Diagnostic dump: per-joint range and max single-step jump for the loaded trajectory
+    if (!trajectory_->samples.empty()) {
+        const double kRad = 180.0 / 3.14159265358979323846;
+        double jmin[6], jmax[6], jmax_step[6];
+        size_t jmax_step_idx[6];
+        for (int j = 0; j < 6; ++j) {
+            jmin[j] = jmax[j] = trajectory_->samples[0].joints[j];
+            jmax_step[j] = 0.0;
+            jmax_step_idx[j] = 0;
+        }
+        for (size_t i = 0; i < trajectory_->samples.size(); ++i) {
+            const auto& q = trajectory_->samples[i].joints;
+            for (int j = 0; j < 6; ++j) {
+                if (q[j] < jmin[j]) jmin[j] = q[j];
+                if (q[j] > jmax[j]) jmax[j] = q[j];
+                if (i > 0) {
+                    double step = std::abs(q[j] - trajectory_->samples[i - 1].joints[j]);
+                    if (step > jmax_step[j]) {
+                        jmax_step[j] = step;
+                        jmax_step_idx[j] = i;
+                    }
+                }
+            }
+        }
+        const auto& s0 = trajectory_->samples.front().joints;
+        const auto& sN = trajectory_->samples.back().joints;
+        spdlog::info("Executor::load: {} samples, duration={:.3f}s",
+                     trajectory_->samples.size(), trajectory_->total_duration);
+        spdlog::info("  sample[0]    deg: [{:8.2f}, {:8.2f}, {:8.2f}, {:8.2f}, {:8.2f}, {:8.2f}]",
+                     s0[0]*kRad, s0[1]*kRad, s0[2]*kRad, s0[3]*kRad, s0[4]*kRad, s0[5]*kRad);
+        spdlog::info("  sample[last] deg: [{:8.2f}, {:8.2f}, {:8.2f}, {:8.2f}, {:8.2f}, {:8.2f}]",
+                     sN[0]*kRad, sN[1]*kRad, sN[2]*kRad, sN[3]*kRad, sN[4]*kRad, sN[5]*kRad);
+        for (int j = 0; j < 6; ++j) {
+            spdlog::info("  J{} range=[{:8.2f}, {:8.2f}] = {:7.2f}deg  max_step={:7.4f}deg @ sample {}",
+                         j+1, jmin[j]*kRad, jmax[j]*kRad,
+                         (jmax[j]-jmin[j])*kRad, jmax_step[j]*kRad, jmax_step_idx[j]);
+        }
+    }
 
     setState(ExecutorState::Ready);
     return true;

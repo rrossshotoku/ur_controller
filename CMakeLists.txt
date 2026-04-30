@@ -124,7 +124,10 @@ add_library(ur_trajectory
     src/trajectory/types.cpp
     src/trajectory/validator.cpp
     src/trajectory/planner.cpp
+    src/trajectory/axis_blend_planner.cpp
     src/trajectory/executor.cpp
+    src/trajectory/path_geometry.cpp
+    src/trajectory/velocity_first/planner.cpp
 )
 target_include_directories(ur_trajectory PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

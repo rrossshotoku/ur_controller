@@ -10,12 +10,19 @@ export class TrajectoryPanel {
         this.timingChart = null;
         this.kinematics = null;  // Will be set when we get FK data
 
+        // Chart popup state
+        this.chartPopupWindow = null;
+        this.chartPopupReady = false;
+        this.lastTimingData = null;
+        this.lastSegmentTimes = null;
+
         this.init();
     }
 
     init() {
         this.setupEventListeners();
         this.initTimingChart();
+        this.loadMotionLimits();
     }
 
     setupEventListeners() {
@@ -56,63 +63,104 @@ export class TrajectoryPanel {
         }
 
         // IK method toggle buttons
-        this.setupIKMethodToggle();
-    }
 
-    setupIKMethodToggle() {
-        const btnAnalytical = document.getElementById('btn-ik-analytical');
-        const btnNumerical = document.getElementById('btn-ik-numerical');
-
-        if (btnAnalytical) {
-            btnAnalytical.addEventListener('click', () => this.setIKMethod('analytical'));
-        }
-        if (btnNumerical) {
-            btnNumerical.addEventListener('click', () => this.setIKMethod('numerical'));
+        // Apply motion limits button
+        const btnApplyLimits = document.getElementById('btn-apply-limits');
+        if (btnApplyLimits) {
+            btnApplyLimits.addEventListener('click', () => this.applyMotionLimits());
         }
 
-        // Load current IK method on startup
-        this.loadCurrentIKMethod();
+        // Chart pop-out button
+        const btnPopoutChart = document.getElementById('btn-popout-chart');
+        if (btnPopoutChart) {
+            btnPopoutChart.addEventListener('click', () => this.openChartPopup());
+        }
+
+        // Listen for messages from chart popup
+        window.addEventListener('message', (event) => {
+            if (event.origin !== window.location.origin) return;
+            if (event.data.type === 'chartPopupReady') {
+                this.chartPopupReady = true;
+                // Send current data to popup
+                if (this.lastTimingData) {
+                    this.sendToChartPopup(this.lastTimingData, this.lastSegmentTimes || []);
+                }
+            } else if (event.data.type === 'chartPopupClosed') {
+                this.chartPopupWindow = null;
+                this.chartPopupReady = false;
+            }
+        });
     }
 
-    async loadCurrentIKMethod() {
+    // Motion limits management
+    async loadMotionLimits() {
         try {
-            const response = await fetch('/api/ik-method');
-            const data = await response.json();
-            this.updateIKMethodButtons(data.method);
+            const response = await fetch('/api/trajectory/config');
+            if (!response.ok) {
+                console.warn('Failed to load motion limits');
+                return;
+            }
+
+            const config = await response.json();
+            this.updateMotionLimitsUI(config);
         } catch (error) {
-            console.warn('Failed to load IK method:', error);
+            console.warn('Failed to load motion limits:', error);
         }
     }
 
-    async setIKMethod(method) {
+    updateMotionLimitsUI(config) {
+        const velInput = document.getElementById('limit-velocity');
+        const accelInput = document.getElementById('limit-acceleration');
+        const jerkInput = document.getElementById('limit-jerk');
+
+        if (velInput && config.max_linear_velocity !== undefined) {
+            velInput.value = config.max_linear_velocity.toFixed(2);
+        }
+        if (accelInput && config.max_linear_acceleration !== undefined) {
+            accelInput.value = config.max_linear_acceleration.toFixed(1);
+        }
+        if (jerkInput && config.max_linear_jerk !== undefined) {
+            jerkInput.value = config.max_linear_jerk.toFixed(1);
+        }
+    }
+
+    async applyMotionLimits() {
+        const velInput = document.getElementById('limit-velocity');
+        const accelInput = document.getElementById('limit-acceleration');
+        const jerkInput = document.getElementById('limit-jerk');
+
+        const config = {};
+        if (velInput) config.max_linear_velocity = parseFloat(velInput.value);
+        if (accelInput) config.max_linear_acceleration = parseFloat(accelInput.value);
+        if (jerkInput) config.max_linear_jerk = parseFloat(jerkInput.value);
+
         try {
-            const response = await fetch('/api/ik-method', {
+            const response = await fetch('/api/trajectory/config', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ method })
+                body: JSON.stringify(config)
             });
 
             const data = await response.json();
             if (data.success) {
-                this.updateIKMethodButtons(data.method);
-                console.log('IK method set to:', data.method);
+                console.log('Motion limits updated:', config);
+                // Update UI with the actual values from server
+                this.updateMotionLimitsUI(data.config || config);
+
+                // If we have a trajectory planned, suggest replanning
+                if (this.plannedTrajectory) {
+                    const shouldReplan = confirm('Motion limits updated. Do you want to replan the trajectory with the new limits?');
+                    if (shouldReplan) {
+                        this.planTrajectory();
+                    }
+                }
             } else {
-                console.error('Failed to set IK method:', data.message);
+                console.error('Failed to update motion limits:', data.message);
+                alert('Failed to update motion limits: ' + (data.message || 'Unknown error'));
             }
         } catch (error) {
-            console.error('Error setting IK method:', error);
-        }
-    }
-
-    updateIKMethodButtons(method) {
-        const btnAnalytical = document.getElementById('btn-ik-analytical');
-        const btnNumerical = document.getElementById('btn-ik-numerical');
-
-        if (btnAnalytical) {
-            btnAnalytical.classList.toggle('active', method === 'analytical');
-        }
-        if (btnNumerical) {
-            btnNumerical.classList.toggle('active', method === 'numerical');
+            console.error('Error applying motion limits:', error);
+            alert('Error applying motion limits: ' + error.message);
         }
     }
 
@@ -136,13 +184,14 @@ export class TrajectoryPanel {
                     labels: [],
                     datasets: [
                         {
-                            label: 'Speed (m/s)',
+                            label: 'Velocity (m/s)',
                             data: [],
                             borderColor: '#0099ff',
                             backgroundColor: 'rgba(0, 153, 255, 0.1)',
                             tension: 0.3,
-                            fill: true,
-                            pointRadius: 0
+                            fill: false,
+                            pointRadius: 0,
+                            yAxisID: 'y'
                         },
                         {
                             label: 'Acceleration (m/s²)',
@@ -150,8 +199,19 @@ export class TrajectoryPanel {
                             borderColor: '#00cc66',
                             backgroundColor: 'rgba(0, 204, 102, 0.1)',
                             tension: 0.3,
-                            fill: true,
-                            pointRadius: 0
+                            fill: false,
+                            pointRadius: 0,
+                            yAxisID: 'y'
+                        },
+                        {
+                            label: 'Jerk (m/s³)',
+                            data: [],
+                            borderColor: '#ff6644',
+                            backgroundColor: 'rgba(255, 102, 68, 0.1)',
+                            tension: 0.3,
+                            fill: false,
+                            pointRadius: 0,
+                            yAxisID: 'y2'
                         }
                     ]
                 },
@@ -159,6 +219,10 @@ export class TrajectoryPanel {
                     responsive: false,
                     maintainAspectRatio: false,
                     animation: false,
+                    interaction: {
+                        mode: 'index',
+                        intersect: false
+                    },
                     scales: {
                         x: {
                             title: { display: true, text: 'Time (s)', color: '#a0a0a0' },
@@ -166,16 +230,31 @@ export class TrajectoryPanel {
                             ticks: { color: '#a0a0a0' }
                         },
                         y: {
-                            title: { display: true, text: 'Value', color: '#a0a0a0' },
+                            type: 'linear',
+                            position: 'left',
+                            title: { display: true, text: 'Vel / Accel', color: '#a0a0a0' },
                             grid: { color: 'rgba(255, 255, 255, 0.1)' },
                             ticks: { color: '#a0a0a0' }
+                        },
+                        y2: {
+                            type: 'linear',
+                            position: 'right',
+                            title: { display: true, text: 'Jerk (m/s³)', color: '#ff6644' },
+                            grid: { drawOnChartArea: false },
+                            ticks: { color: '#ff6644' }
                         }
                     },
                     plugins: {
-                        legend: { labels: { color: '#e8e8e8' } }
+                        legend: { labels: { color: '#e8e8e8' } },
+                        annotation: {
+                            annotations: {}  // Will be populated with waypoint lines
+                        }
                     }
                 }
             });
+
+            // Store segment times for waypoint markers
+            this.segmentTimes = [];
         } catch (err) {
             console.error('Failed to initialize timing chart:', err);
         }
@@ -477,6 +556,8 @@ export class TrajectoryPanel {
     }
 
     async planTrajectory() {
+        console.log('planTrajectory called, elements:', this.elements.length);
+
         if (this.elements.length === 0) {
             alert('Add at least one element');
             return;
@@ -506,31 +587,58 @@ export class TrajectoryPanel {
                 }
             });
 
+            // Get current motion limits from UI
+            const velInput = document.getElementById('limit-velocity');
+            const accelInput = document.getElementById('limit-acceleration');
+            const jerkInput = document.getElementById('limit-jerk');
+            const methodSelect = document.getElementById('planning-method');
+            const planningMethod = methodSelect ? methodSelect.value : 'geometric';
+
+            const config = {
+                max_linear_velocity: velInput ? parseFloat(velInput.value) : 0.5,
+                max_linear_acceleration: accelInput ? parseFloat(accelInput.value) : 1.0,
+                max_linear_jerk: jerkInput ? parseFloat(jerkInput.value) : 5.0,
+                max_joint_velocity: 1.5,
+                planning_method: planningMethod
+            };
+
             const response = await fetch('/api/trajectory/plan2', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     elements: apiElements,
-                    config: {
-                        max_linear_velocity: 0.5,
-                        max_joint_velocity: 1.5
-                    }
+                    planning_method: planningMethod,
+                    config: config
                 })
             });
 
             const data = await response.json();
+            console.log('planTrajectory response:', data);
             this.plannedTrajectory = data;
 
             // Show validation messages
             this.showValidationMessages(data.messages || []);
 
             // Update visualization
+            console.log('Plan response:', { valid: data.valid, hasViz: !!data.visualization });
             if (data.valid && data.visualization) {
+                console.log('Visualization data:', {
+                    hasTiming: !!data.visualization.timing,
+                    timingType: typeof data.visualization.timing,
+                    timingKeys: data.visualization.timing ? Object.keys(data.visualization.timing).length : 0,
+                    hasSegTimes: !!data.visualization.segment_times
+                });
                 if (data.visualization.timing) {
-                    this.updateTimingChart(data.visualization.timing);
+                    const segTimes = data.visualization.segment_times || [];
+                    this.updateTimingChart(data.visualization.timing, segTimes);
                 }
                 if (data.visualization.path) {
-                    this.onPathUpdate(data.visualization.path);
+                    // Convert object with numeric keys to array if needed
+                    const pathArray = Array.isArray(data.visualization.path)
+                        ? data.visualization.path
+                        : Object.values(data.visualization.path);
+                    console.log('Updating path with', pathArray.length, 'points');
+                    this.onPathUpdate(pathArray);
                 }
             }
 
@@ -572,13 +680,68 @@ export class TrajectoryPanel {
         });
     }
 
-    updateTimingChart(timing) {
-        if (!this.timingChart || !timing || !timing.length) return;
+    updateTimingChart(timing, segmentTimes = []) {
+        if (!this.timingChart || !timing) return;
 
-        this.timingChart.data.labels = timing.map(t => t.time.toFixed(2));
-        this.timingChart.data.datasets[0].data = timing.map(t => t.speed || 0);
-        this.timingChart.data.datasets[1].data = timing.map(t => t.acceleration || 0);
+        // Convert object with numeric keys to array if needed
+        let timingArray = Array.isArray(timing) ? timing : Object.values(timing);
+        if (!timingArray.length) return;
+
+        this.timingChart.data.labels = timingArray.map(t => t.time.toFixed(2));
+        this.timingChart.data.datasets[0].data = timingArray.map(t => t.speed || 0);
+        this.timingChart.data.datasets[1].data = timingArray.map(t => t.acceleration || 0);
+        this.timingChart.data.datasets[2].data = timingArray.map(t => t.jerk || 0);
+
+        // Add waypoint marker lines using annotations
+        const annotations = {};
+        // Convert object with numeric keys to array if needed
+        const segTimesArray = Array.isArray(segmentTimes) ? segmentTimes : Object.values(segmentTimes || {});
+        const labels = this.timingChart.data.labels;
+
+        if (segTimesArray.length > 0 && labels.length > 0) {
+            segTimesArray.forEach((time, idx) => {
+                // Find the closest label to this segment time
+                let closestLabel = labels[0];
+                let minDiff = Math.abs(parseFloat(labels[0]) - time);
+
+                for (const label of labels) {
+                    const diff = Math.abs(parseFloat(label) - time);
+                    if (diff < minDiff) {
+                        minDiff = diff;
+                        closestLabel = label;
+                    }
+                }
+
+                annotations[`wp${idx}`] = {
+                    type: 'line',
+                    xMin: closestLabel,
+                    xMax: closestLabel,
+                    borderColor: 'rgba(255, 68, 136, 0.7)',
+                    borderWidth: 2,
+                    borderDash: [5, 5],
+                    label: {
+                        display: true,
+                        content: `WP${idx + 1}`,
+                        position: 'start',
+                        backgroundColor: 'rgba(255, 68, 136, 0.8)',
+                        color: '#fff',
+                        font: { size: 10 }
+                    }
+                };
+            });
+        }
+
+        // Update annotations if the plugin is available
+        if (this.timingChart.options.plugins.annotation) {
+            this.timingChart.options.plugins.annotation.annotations = annotations;
+        }
+
         this.timingChart.update();
+
+        // Store for pop-out window and send to popup if open
+        this.lastTimingData = timing;
+        this.lastSegmentTimes = segmentTimes;
+        this.sendToChartPopup(timing, segmentTimes);
     }
 
     async executeTrajectory() {
@@ -760,6 +923,40 @@ export class TrajectoryPanel {
             await fetch('/api/stop', { method: 'POST' });
         } catch (err) {
             console.error('Failed to stop move:', err);
+        }
+    }
+
+    // Open velocity profile chart in popup window
+    openChartPopup() {
+        // If popup already open, focus it
+        if (this.chartPopupWindow && !this.chartPopupWindow.closed) {
+            this.chartPopupWindow.focus();
+            return;
+        }
+
+        // Open new popup window
+        const width = 900;
+        const height = 500;
+        const left = window.screenX + 100;
+        const top = window.screenY + 100;
+
+        this.chartPopupWindow = window.open(
+            '/chart-popup.html',
+            'VelocityProfile',
+            `width=${width},height=${height},left=${left},top=${top},resizable=yes`
+        );
+
+        this.chartPopupReady = false;
+    }
+
+    // Send timing data to chart popup
+    sendToChartPopup(timing, segmentTimes) {
+        if (this.chartPopupWindow && !this.chartPopupWindow.closed && this.chartPopupReady) {
+            this.chartPopupWindow.postMessage({
+                type: 'chartData',
+                timing: timing,
+                segmentTimes: segmentTimes
+            }, window.location.origin);
         }
     }
 }

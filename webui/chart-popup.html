@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>UR Controller - Velocity Profile</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            background-color: #1a1a2e;
+            color: #e8e8e8;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            overflow: hidden;
+        }
+        #chart-container {
+            width: 100vw;
+            height: 100vh;
+            padding: 20px;
+        }
+        canvas {
+            width: 100% !important;
+            height: 100% !important;
+        }
+    </style>
+</head>
+<body>
+    <div id="chart-container">
+        <canvas id="velocity-chart"></canvas>
+    </div>
+
+    <script>
+        class ChartPopup {
+            constructor() {
+                this.chart = null;
+                this.init();
+            }
+
+            init() {
+                this.createChart();
+
+                // Listen for messages from parent window
+                window.addEventListener('message', (event) => {
+                    if (event.origin !== window.location.origin) return;
+
+                    const data = event.data;
+                    if (!data || !data.type) return;
+
+                    switch (data.type) {
+                        case 'chartData':
+                            this.updateChart(data.timing, data.segmentTimes);
+                            break;
+                    }
+                });
+
+                // Notify parent that we're ready
+                if (window.opener) {
+                    window.opener.postMessage({ type: 'chartPopupReady' }, window.location.origin);
+                }
+
+                // Handle window close
+                window.addEventListener('beforeunload', () => {
+                    if (window.opener) {
+                        window.opener.postMessage({ type: 'chartPopupClosed' }, window.location.origin);
+                    }
+                });
+
+                // Handle resize
+                window.addEventListener('resize', () => {
+                    if (this.chart) {
+                        this.chart.resize();
+                    }
+                });
+            }
+
+            createChart() {
+                const ctx = document.getElementById('velocity-chart').getContext('2d');
+
+                this.chart = new Chart(ctx, {
+                    type: 'line',
+                    data: {
+                        labels: [],
+                        datasets: [
+                            {
+                                label: 'Velocity (m/s)',
+                                data: [],
+                                borderColor: '#0099ff',
+                                backgroundColor: 'rgba(0, 153, 255, 0.1)',
+                                tension: 0.3,
+                                fill: false,
+                                pointRadius: 0,
+                                borderWidth: 2,
+                                yAxisID: 'y'
+                            },
+                            {
+                                label: 'Acceleration (m/s\u00B2)',
+                                data: [],
+                                borderColor: '#00cc66',
+                                backgroundColor: 'rgba(0, 204, 102, 0.1)',
+                                tension: 0.3,
+                                fill: false,
+                                pointRadius: 0,
+                                borderWidth: 2,
+                                yAxisID: 'y'
+                            },
+                            {
+                                label: 'Jerk (m/s\u00B3)',
+                                data: [],
+                                borderColor: '#ff6644',
+                                backgroundColor: 'rgba(255, 102, 68, 0.1)',
+                                tension: 0.3,
+                                fill: false,
+                                pointRadius: 0,
+                                borderWidth: 2,
+                                yAxisID: 'y2'
+                            }
+                        ]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        animation: false,
+                        interaction: {
+                            mode: 'index',
+                            intersect: false
+                        },
+                        scales: {
+                            x: {
+                                title: { display: true, text: 'Time (s)', color: '#a0a0a0', font: { size: 14 } },
+                                grid: { color: 'rgba(255, 255, 255, 0.1)' },
+                                ticks: { color: '#a0a0a0' }
+                            },
+                            y: {
+                                type: 'linear',
+                                position: 'left',
+                                title: { display: true, text: 'Velocity / Acceleration', color: '#a0a0a0', font: { size: 14 } },
+                                grid: { color: 'rgba(255, 255, 255, 0.1)' },
+                                ticks: { color: '#a0a0a0' }
+                            },
+                            y2: {
+                                type: 'linear',
+                                position: 'right',
+                                title: { display: true, text: 'Jerk (m/s\u00B3)', color: '#ff6644', font: { size: 14 } },
+                                grid: { drawOnChartArea: false },
+                                ticks: { color: '#ff6644' }
+                            }
+                        },
+                        plugins: {
+                            legend: {
+                                labels: { color: '#e8e8e8', font: { size: 14 } }
+                            },
+                            tooltip: {
+                                backgroundColor: 'rgba(0, 0, 0, 0.8)',
+                                titleFont: { size: 14 },
+                                bodyFont: { size: 13 },
+                                callbacks: {
+                                    label: function(context) {
+                                        const label = context.dataset.label || '';
+                                        const value = context.parsed.y.toFixed(4);
+                                        return `${label}: ${value}`;
+                                    }
+                                }
+                            },
+                            annotation: {
+                                annotations: {}
+                            }
+                        }
+                    }
+                });
+            }
+
+            updateChart(timing, segmentTimes = []) {
+                if (!this.chart || !timing) return;
+
+                // Convert object with numeric keys to array if needed
+                let timingArray = Array.isArray(timing) ? timing : Object.values(timing);
+                if (!timingArray.length) return;
+
+                this.chart.data.labels = timingArray.map(t => t.time.toFixed(2));
+                this.chart.data.datasets[0].data = timingArray.map(t => t.speed || 0);
+                this.chart.data.datasets[1].data = timingArray.map(t => t.acceleration || 0);
+                this.chart.data.datasets[2].data = timingArray.map(t => t.jerk || 0);
+
+                // Add waypoint marker lines
+                const annotations = {};
+                // Convert object with numeric keys to array if needed
+                const segTimesArray = Array.isArray(segmentTimes) ? segmentTimes : Object.values(segmentTimes || {});
+                if (segTimesArray.length > 0) {
+                    segTimesArray.forEach((time, idx) => {
+                        annotations[`wp${idx}`] = {
+                            type: 'line',
+                            xMin: time.toFixed(2),
+                            xMax: time.toFixed(2),
+                            borderColor: 'rgba(255, 68, 136, 0.8)',
+                            borderWidth: 2,
+                            borderDash: [6, 4],
+                            label: {
+                                display: true,
+                                content: `WP${idx + 1}`,
+                                position: 'start',
+                                backgroundColor: 'rgba(255, 68, 136, 0.9)',
+                                color: '#fff',
+                                font: { size: 12, weight: 'bold' },
+                                padding: 4
+                            }
+                        };
+                    });
+                }
+
+                this.chart.options.plugins.annotation.annotations = annotations;
+                this.chart.update();
+            }
+        }
+
+        // Start the popup
+        window.addEventListener('DOMContentLoaded', () => {
+            new ChartPopup();
+        });
+    </script>
+</body>
+</html>

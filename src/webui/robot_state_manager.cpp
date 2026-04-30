@@ -179,14 +179,24 @@ bool RobotStateManager::stopJ(double deceleration) {
     std::lock_guard<std::mutex> lock(control_mutex_);
 
     if (!rtde_control_) {
+        control_mode_ = ControlMode::Idle;
         return false;
     }
 
     try {
+        // Stop any active streaming mode first
+        if (control_mode_ == ControlMode::Trajectory) {
+            rtde_control_->servoStop();
+        } else if (control_mode_ == ControlMode::Jogging) {
+            rtde_control_->speedStop();
+        }
+        control_mode_ = ControlMode::Idle;
+
         rtde_control_->stopJ(deceleration);
         return true;
     } catch (const std::exception& e) {
         spdlog::error("stopJ failed: {}", e.what());
+        control_mode_ = ControlMode::Idle;
         return false;
     }
 }
@@ -329,6 +339,16 @@ bool RobotStateManager::moveJ(const std::array<double, 6>& target_q,
     }
 
     try {
+        // Stop any active streaming mode before starting a move
+        if (control_mode_ == ControlMode::Trajectory) {
+            spdlog::info("Stopping servo mode before moveJ");
+            rtde_control_->servoStop();
+        } else if (control_mode_ == ControlMode::Jogging) {
+            spdlog::info("Stopping speed mode before moveJ");
+            rtde_control_->speedStop();
+        }
+        control_mode_ = ControlMode::Idle;
+
         // Convert array to vector for ur_rtde
         std::vector<double> q(target_q.begin(), target_q.end());
         // async=true so it returns immediately (can be stopped with stopJ)
@@ -350,6 +370,16 @@ bool RobotStateManager::moveL(const std::array<double, 6>& target_pose,
     }
 
     try {
+        // Stop any active streaming mode before starting a move
+        if (control_mode_ == ControlMode::Trajectory) {
+            spdlog::info("Stopping servo mode before moveL");
+            rtde_control_->servoStop();
+        } else if (control_mode_ == ControlMode::Jogging) {
+            spdlog::info("Stopping speed mode before moveL");
+            rtde_control_->speedStop();
+        }
+        control_mode_ = ControlMode::Idle;
+
         // Convert array to vector for ur_rtde
         std::vector<double> pose(target_pose.begin(), target_pose.end());
         // async=true so it returns immediately (can be stopped with stopL)

@@ -339,13 +339,13 @@ export class RobotViewer {
             let size;
             if (wp.type === 'setup_pose') {
                 color = 0xff9900;  // Orange for setup poses
-                size = 0.025;
+                size = 0.008;
             } else if (wp.isEntry) {
                 color = 0x0099ff;  // Blue for entry points
-                size = 0.022;
+                size = 0.007;
             } else {
                 color = 0xff4488;  // Pink for sequence waypoints
-                size = 0.02;
+                size = 0.007;
             }
 
             // Create sphere marker
@@ -360,7 +360,7 @@ export class RobotViewer {
             // Create label sprite
             const labelText = wp.label || `WP${index + 1}`;
             const label = this.createTextSprite(labelText, color);
-            label.position.set(wp.position.x, wp.position.z + size + 0.03, -wp.position.y);
+            label.position.set(wp.position.x, wp.position.z + size + 0.015, -wp.position.y);
             label.scale.set(0.08, 0.04, 1);
             this.scene.add(label);
 

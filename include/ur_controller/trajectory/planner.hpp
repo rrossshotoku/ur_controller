@@ -145,12 +145,6 @@ public:
     /// @brief Get the validator
     [[nodiscard]] const TrajectoryValidator& validator() const { return validator_; }
 
-    /// @brief Get current IK method
-    [[nodiscard]] IKMethod getIKMethod() const { return config_.ik_method; }
-
-    /// @brief Set IK method
-    void setIKMethod(IKMethod method) { config_.ik_method = method; }
-
 private:
     /// @brief Segment between two waypoints
     struct Segment {
@@ -171,10 +165,12 @@ private:
     /// @brief Plan joint-space motion using Ruckig
     /// @param segments Segments to plan
     /// @param waypoints Original waypoints
+    /// @param messages Output vector for validation messages
     /// @return Trajectory samples at sample_rate
     [[nodiscard]] std::vector<TrajectorySample> planJointMotion(
         const std::vector<Segment>& segments,
-        const std::vector<Waypoint>& waypoints);
+        const std::vector<Waypoint>& waypoints,
+        std::vector<ValidationMessage>& messages);
 
     /// @brief Create a single trajectory sample
     [[nodiscard]] TrajectorySample createSample(
@@ -251,6 +247,7 @@ private:
     /// @param duration Segment duration in seconds
     /// @param entry_velocity TCP velocity at segment start (m/s)
     /// @param exit_velocity TCP velocity at segment end (m/s)
+    /// @param prev_seg_joints Previous segment's last joints (for velocity continuity)
     /// @return Trajectory samples with linear TCP path
     [[nodiscard]] std::vector<TrajectorySample> planSegmentLinearCartesian(
         const Eigen::Isometry3d& start_pose,
@@ -259,7 +256,8 @@ private:
         double start_time,
         double duration,
         double entry_velocity,
-        double exit_velocity);
+        double exit_velocity,
+        std::optional<JointVector> prev_seg_joints = std::nullopt);
 
     /// @brief Plan a segment with linear portion + half blend arc (unified sampling)
     ///
@@ -277,6 +275,7 @@ private:
     /// @param entry_velocity TCP velocity at segment start (m/s)
     /// @param exit_velocity TCP velocity at segment end (m/s)
     /// @param end_pose End pose (used when first_half=false)
+    /// @param prev_seg_joints Previous segment's last joints (for velocity continuity)
     /// @return Trajectory samples with evenly spaced points
     [[nodiscard]] std::vector<TrajectorySample> planSegmentWithHalfArc(
         const Eigen::Isometry3d& start_pose,
@@ -287,7 +286,34 @@ private:
         bool first_half,
         double entry_velocity,
         double exit_velocity,
-        const Eigen::Isometry3d& end_pose = Eigen::Isometry3d::Identity());
+        const Eigen::Isometry3d& end_pose = Eigen::Isometry3d::Identity(),
+        std::optional<JointVector> prev_seg_joints = std::nullopt);
+
+    /// @brief Plan a segment with blend arcs on both ends
+    ///
+    /// Samples: second half of prev_arc + linear + first half of next_arc
+    /// as one continuous path with S-curve velocity profile.
+    ///
+    /// @param start_pose Starting TCP pose (at prev_arc midpoint)
+    /// @param start_joints Joint configuration at start
+    /// @param prev_arc Blend arc from previous waypoint (sample second half)
+    /// @param next_arc Blend arc at next waypoint (sample first half)
+    /// @param start_time Trajectory time at segment start
+    /// @param duration Total segment duration
+    /// @param entry_velocity TCP velocity at segment start (m/s)
+    /// @param exit_velocity TCP velocity at segment end (m/s)
+    /// @param prev_seg_joints Previous segment's last joints (for velocity continuity)
+    /// @return Trajectory samples with evenly spaced points
+    [[nodiscard]] std::vector<TrajectorySample> planSegmentWithBothArcs(
+        const Eigen::Isometry3d& start_pose,
+        const JointVector& start_joints,
+        const BlendArcInfo& prev_arc,
+        const BlendArcInfo& next_arc,
+        double start_time,
+        double duration,
+        double entry_velocity,
+        double exit_velocity,
+        std::optional<JointVector> prev_seg_joints = std::nullopt);
 
     /// @brief Solve IK using the configured method
     ///

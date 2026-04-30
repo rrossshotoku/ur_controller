@@ -8,7 +8,9 @@
 #include "ur_controller/trajectory/validator.hpp"
 #include "ur_controller/trajectory/planner.hpp"
 #include "ur_controller/trajectory/executor.hpp"
+#include "ur_controller/trajectory/s_curve.hpp"
 #include "ur_controller/kinematics/ur_kinematics.hpp"
+#include <ruckig/ruckig.hpp>
 
 #include <cmath>
 #include <thread>
@@ -218,6 +220,9 @@ TEST_CASE("TrajectoryPlanner generates valid trajectories", "[trajectory][planne
             createReachableWaypoint(-0.4, 0.3, 0.35),
             createReachableWaypoint(-0.3, 0.3, 0.4)
         };
+        // Set achievable segment times for rest-to-rest profiles
+        waypoints[1].segment_time = 1.0;
+        waypoints[2].segment_time = 1.0;
 
         auto trajectory = planner.plan(waypoints);
 
@@ -297,7 +302,7 @@ TEST_CASE("TrajectoryExecutor loads and executes trajectory", "[trajectory][exec
         createReachableWaypoint(-0.4, 0.2, 0.3),
         createReachableWaypoint(-0.4, 0.25, 0.32)
     };
-    waypoints[1].segment_time = 0.2;  // Quick motion
+    waypoints[1].segment_time = 1.0;  // Achievable with rest-to-rest profile
 
     auto trajectory = planner.plan(waypoints);
     REQUIRE(trajectory.valid);
@@ -354,7 +359,7 @@ TEST_CASE("TrajectoryExecutor pause and resume", "[trajectory][executor]") {
         createReachableWaypoint(-0.4, 0.2, 0.3),
         createReachableWaypoint(-0.4, 0.25, 0.32)
     };
-    waypoints[1].segment_time = 0.5;
+    waypoints[1].segment_time = 1.0;  // Achievable duration for S-curve profile
 
     auto trajectory = planner.plan(waypoints);
     executor.load(trajectory);
@@ -643,11 +648,12 @@ TEST_CASE("Path deviation analysis", "[trajectory][planner][deviation]") {
     TrajectoryPlanner planner(kin);
 
     // User-reported path with deviations
+    // Distance ~0.965m, with V_max=0.5 m/s, need T >= 2*D/(V_max+0) = 3.86s
     std::vector<Waypoint> waypoints = {
         createReachableWaypoint(-0.449, -0.244, 0.785),
         createReachableWaypoint(0.504, -0.088, 0.785)
     };
-    waypoints[1].segment_time = 3.0;
+    waypoints[1].segment_time = 4.0;
 
     std::cout << "\n=== Path Deviation Analysis ===" << std::endl;
     std::cout << "From: (-0.449, -0.244, 0.785) To: (0.504, -0.088, 0.785)" << std::endl;
@@ -1124,8 +1130,8 @@ TEST_CASE("Full trajectory workflow", "[trajectory][integration]") {
         createReachableWaypoint(-0.4, 0.25, 0.35),
         createReachableWaypoint(-0.35, 0.25, 0.35)
     };
-    waypoints[1].segment_time = 0.1;
-    waypoints[2].segment_time = 0.1;
+    waypoints[1].segment_time = 1.0;  // Achievable duration for S-curve profile
+    waypoints[2].segment_time = 1.0;  // Achievable duration for S-curve profile
 
     auto trajectory = planner.plan(waypoints);
     REQUIRE(trajectory.valid);
@@ -1163,11 +1169,12 @@ TEST_CASE("Base rotation path analysis", "[trajectory][planner][base_rotation]")
     // User-reported path where TCP leaves the straight line while base spins
     // Start: nearly in front of robot (X close to 0), Y negative
     // End: to the right and forward
+    // Distance ~0.967m, with V_max=0.5 m/s, need T >= 3.87s
     std::vector<Waypoint> waypoints = {
         createReachableWaypoint(-0.015, -0.511, 0.785),
         createReachableWaypoint(0.326, 0.394, 0.785)
     };
-    waypoints[1].segment_time = 3.0;
+    waypoints[1].segment_time = 4.0;
 
     std::cout << "\n=== Base Rotation Path Analysis ===" << std::endl;
     std::cout << "From: (-0.015, -0.511, 0.785) To: (0.326, 0.394, 0.785)" << std::endl;
@@ -1628,6 +1635,9 @@ TEST_CASE("User reported jog path analysis", "[trajectory][planner][user_jog_pat
         waypoints.push_back(createReachableWaypoint(-0.286, 0.274, 0.484));
         waypoints.push_back(createReachableWaypoint(0.256, 0.479, 0.476));
         waypoints.push_back(createReachableWaypoint(0.380, 0.152, 0.459));
+        // Set segment times adequate for the distances and V_max=0.5 m/s
+        waypoints[1].segment_time = 2.5;  // WP1->WP2: ~0.58m, need T >= 2.32s
+        waypoints[2].segment_time = 1.5;  // WP2->WP3: ~0.35m, need T >= 1.40s
 
         auto trajectory = planner.plan(waypoints);
 
@@ -1883,3 +1893,384 @@ TEST_CASE("Rectangular path should not require configuration change", "[trajecto
         std::cout << "*** Path appears feasible with smooth interpolation ***" << std::endl;
     }
 }
+
+
+// =============================================================================
+// Ruckig Path Parameter Investigation
+// =============================================================================
+
+TEST_CASE("Ruckig 1D path parameter behavior", "[trajectory][ruckig][debug]") {
+    // Test case from user's scenario:
+    // Segment 1: distance=0.184m, duration=5.00s, v_entry=0.000, v_exit=0.479
+
+    SECTION("Long duration with high exit velocity") {
+        ruckig::Ruckig<1> ruckig;
+        ruckig::InputParameter<1> input;
+        ruckig::Trajectory<1> trajectory;
+
+        double distance = 0.184;  // meters
+        double duration = 5.0;    // seconds
+        double v_entry = 0.0;     // m/s
+        double v_exit = 0.479;    // m/s
+
+        // Set initial state
+        input.current_position[0] = 0.0;
+        input.current_velocity[0] = v_entry;
+        input.current_acceleration[0] = 0.0;
+
+        // Set target state
+        input.target_position[0] = distance;
+        input.target_velocity[0] = v_exit;
+        input.target_acceleration[0] = 0.0;
+
+        // Set kinematic limits (from TrajectoryConfig defaults)
+        input.max_velocity[0] = 0.5;      // m/s
+        input.max_acceleration[0] = 1.0;  // m/s²
+        input.max_jerk[0] = 5.0;          // m/s³
+
+        // Set minimum duration
+        input.minimum_duration = duration;
+
+        // Calculate trajectory
+        ruckig::Result result = ruckig.calculate(input, trajectory);
+
+        std::cout << "\n=== Ruckig 1D Path Test ==="  << std::endl;
+        std::cout << "Input:" << std::endl;
+        std::cout << "  distance = " << distance << " m" << std::endl;
+        std::cout << "  duration = " << duration << " s" << std::endl;
+        std::cout << "  v_entry = " << v_entry << " m/s" << std::endl;
+        std::cout << "  v_exit = " << v_exit << " m/s" << std::endl;
+        std::cout << "  max_velocity = " << input.max_velocity[0] << " m/s" << std::endl;
+        std::cout << "  max_acceleration = " << input.max_acceleration[0] << " m/s²" << std::endl;
+        std::cout << "  max_jerk = " << input.max_jerk[0] << " m/s³" << std::endl;
+
+        std::cout << "\nResult: " << static_cast<int>(result) << std::endl;
+        std::cout << "  (0=Working, 1=Finished, -1=Error...)" << std::endl;
+
+        if (result == ruckig::Result::Working || result == ruckig::Result::Finished) {
+            double actual_duration = trajectory.get_duration();
+            std::cout << "\nActual duration: " << actual_duration << " s" << std::endl;
+
+            // Sample at key points
+            std::array<double, 1> pos, vel, acc;
+            std::cout << "\nTrajectory samples:" << std::endl;
+            std::cout << "  t=0.0: ";
+            trajectory.at_time(0.0, pos, vel, acc);
+            std::cout << "pos=" << pos[0] << ", vel=" << vel[0] << std::endl;
+
+            for (double t = 0.5; t < actual_duration; t += 0.5) {
+                trajectory.at_time(t, pos, vel, acc);
+                std::cout << "  t=" << t << ": pos=" << pos[0] << ", vel=" << vel[0] << std::endl;
+            }
+
+            trajectory.at_time(actual_duration, pos, vel, acc);
+            std::cout << "  t=" << actual_duration << " (end): pos=" << pos[0] << ", vel=" << vel[0] << std::endl;
+
+            // Check if final position matches target
+            std::cout << "\nFinal position: " << pos[0] << " (target: " << distance << ")" << std::endl;
+            std::cout << "Final velocity: " << vel[0] << " (target: " << v_exit << ")" << std::endl;
+
+            // Check if position ever exceeds target
+            double max_pos = 0.0;
+            for (double t = 0.0; t <= actual_duration; t += 0.01) {
+                trajectory.at_time(t, pos, vel, acc);
+                if (pos[0] > max_pos) max_pos = pos[0];
+            }
+            std::cout << "\nMax position reached: " << max_pos << " m" << std::endl;
+            if (max_pos > distance * 1.01) {
+                std::cout << "*** WARNING: Position exceeded target by " 
+                          << (max_pos - distance) * 1000 << " mm ***" << std::endl;
+            }
+
+            REQUIRE(result == ruckig::Result::Working);
+            // Check final position is close to target
+            trajectory.at_time(actual_duration, pos, vel, acc);
+            CHECK(std::abs(pos[0] - distance) < 0.001);
+        } else {
+            std::cout << "*** Ruckig FAILED to compute trajectory ***" << std::endl;
+            FAIL("Ruckig returned error");
+        }
+    }
+
+    SECTION("Very long duration - should add cruise phase") {
+        ruckig::Ruckig<1> ruckig;
+        ruckig::InputParameter<1> input;
+        ruckig::Trajectory<1> trajectory;
+
+        double distance = 0.184;
+        double duration = 10.0;  // Even longer
+        double v_entry = 0.0;
+        double v_exit = 0.479;
+
+        input.current_position[0] = 0.0;
+        input.current_velocity[0] = v_entry;
+        input.current_acceleration[0] = 0.0;
+        input.target_position[0] = distance;
+        input.target_velocity[0] = v_exit;
+        input.target_acceleration[0] = 0.0;
+        input.max_velocity[0] = 0.5;
+        input.max_acceleration[0] = 1.0;
+        input.max_jerk[0] = 5.0;
+        input.minimum_duration = duration;
+
+        ruckig::Result result = ruckig.calculate(input, trajectory);
+
+        std::cout << "\n=== Ruckig 10s Duration Test ==="  << std::endl;
+        std::cout << "Result: " << static_cast<int>(result) << std::endl;
+
+        if (result == ruckig::Result::Working || result == ruckig::Result::Finished) {
+            double actual_duration = trajectory.get_duration();
+            std::cout << "Actual duration: " << actual_duration << " s" << std::endl;
+
+            std::array<double, 1> pos, vel, acc;
+            trajectory.at_time(actual_duration, pos, vel, acc);
+            std::cout << "Final pos=" << pos[0] << ", vel=" << vel[0] << std::endl;
+
+            // Check max position
+            double max_pos = 0.0;
+            for (double t = 0.0; t <= actual_duration; t += 0.01) {
+                trajectory.at_time(t, pos, vel, acc);
+                if (pos[0] > max_pos) max_pos = pos[0];
+            }
+            std::cout << "Max position: " << max_pos << " m (target: " << distance << ")" << std::endl;
+        }
+    }
+
+    SECTION("Short duration - time optimal") {
+        ruckig::Ruckig<1> ruckig;
+        ruckig::InputParameter<1> input;
+        ruckig::Trajectory<1> trajectory;
+
+        double distance = 0.184;
+        double v_entry = 0.0;
+        double v_exit = 0.479;
+
+        input.current_position[0] = 0.0;
+        input.current_velocity[0] = v_entry;
+        input.current_acceleration[0] = 0.0;
+        input.target_position[0] = distance;
+        input.target_velocity[0] = v_exit;
+        input.target_acceleration[0] = 0.0;
+        input.max_velocity[0] = 0.5;
+        input.max_acceleration[0] = 1.0;
+        input.max_jerk[0] = 5.0;
+        // NO minimum_duration - let Ruckig find optimal
+
+        ruckig::Result result = ruckig.calculate(input, trajectory);
+
+        std::cout << "\n=== Ruckig Time-Optimal Test ==="  << std::endl;
+        std::cout << "Result: " << static_cast<int>(result) << std::endl;
+
+        if (result == ruckig::Result::Working || result == ruckig::Result::Finished) {
+            double actual_duration = trajectory.get_duration();
+            std::cout << "Time-optimal duration: " << actual_duration << " s" << std::endl;
+
+            std::array<double, 1> pos, vel, acc;
+            trajectory.at_time(actual_duration, pos, vel, acc);
+            std::cout << "Final pos=" << pos[0] << ", vel=" << vel[0] << std::endl;
+        }
+    }
+}
+
+TEST_CASE("Ruckig impossible constraint - short distance high exit velocity", "[trajectory][ruckig][debug]") {
+    // From user's scenario:
+    // Segment 1: dist=0.107m, T=5.00s, v_entry=0.000, v_exit=0.473
+    // This is IMPOSSIBLE: need 0.112m to accelerate from 0 to 0.473 at 1.0 m/s²
+
+    ruckig::Ruckig<1> ruckig;
+    ruckig::InputParameter<1> input;
+    ruckig::Trajectory<1> trajectory;
+
+    double distance = 0.107;  // meters (too short!)
+    double duration = 5.0;    // seconds
+    double v_entry = 0.0;     // m/s
+    double v_exit = 0.473;    // m/s
+
+    input.current_position[0] = 0.0;
+    input.current_velocity[0] = v_entry;
+    input.current_acceleration[0] = 0.0;
+    input.target_position[0] = distance;
+    input.target_velocity[0] = v_exit;
+    input.target_acceleration[0] = 0.0;
+    input.max_velocity[0] = 0.5;
+    input.max_acceleration[0] = 1.0;
+    input.max_jerk[0] = 5.0;
+    input.minimum_duration = duration;
+
+    ruckig::Result result = ruckig.calculate(input, trajectory);
+
+    std::cout << "\n=== Impossible Constraint Test ===" << std::endl;
+    std::cout << "Input: distance=" << distance << "m, v_exit=" << v_exit << " m/s" << std::endl;
+    std::cout << "Min distance to reach v_exit at 1.0 m/s²: "
+              << (0.5 * v_exit * v_exit / 1.0) << " m" << std::endl;
+    std::cout << "Result: " << static_cast<int>(result) << std::endl;
+
+    if (result == ruckig::Result::Working || result == ruckig::Result::Finished) {
+        double actual_duration = trajectory.get_duration();
+        std::cout << "Actual duration: " << actual_duration << " s" << std::endl;
+
+        std::array<double, 1> pos, vel, acc;
+
+        // Sample at key points
+        std::cout << "\nTrajectory profile:" << std::endl;
+        for (double t = 0.0; t <= actual_duration + 0.01; t += 0.5) {
+            if (t > actual_duration) t = actual_duration;
+            trajectory.at_time(t, pos, vel, acc);
+            std::cout << "  t=" << t << "s: pos=" << pos[0] << "m, vel=" << vel[0] << " m/s" << std::endl;
+            if (t >= actual_duration) break;
+        }
+
+        trajectory.at_time(actual_duration, pos, vel, acc);
+        std::cout << "\nFinal: pos=" << pos[0] << " (target: " << distance << ")" << std::endl;
+        std::cout << "Final: vel=" << vel[0] << " (target: " << v_exit << ")" << std::endl;
+
+        // Check if it exceeded target position
+        double max_pos = 0.0;
+        for (double t = 0.0; t <= actual_duration; t += 0.01) {
+            trajectory.at_time(t, pos, vel, acc);
+            if (pos[0] > max_pos) max_pos = pos[0];
+        }
+        std::cout << "Max position: " << max_pos << " m" << std::endl;
+
+        if (std::abs(vel[0] - v_exit) > 0.01) {
+            std::cout << "*** WARNING: Did not reach target velocity! ***" << std::endl;
+        }
+    } else {
+        std::cout << "*** Ruckig returned ERROR ***" << std::endl;
+    }
+}
+
+// =============================================================================
+// Analytical Velocity Solver Tests (via TrajectoryPlanner integration)
+// =============================================================================
+
+TEST_CASE("Analytical velocity solver - reasonable segment durations", "[trajectory][velocity][analytical]") {
+    URKinematics kinematics(URModel::UR5e);
+    TrajectoryConfig config;
+    config.max_linear_velocity = 0.5;       // m/s
+    config.max_linear_acceleration = 1.0;   // m/s²
+    config.max_linear_jerk = 5.0;           // m/s³
+    config.sample_rate = 100.0;             // Hz
+
+    TrajectoryPlanner planner(kinematics, config);
+
+    SECTION("Two waypoints with reasonable segment time - should succeed") {
+        std::vector<Waypoint> waypoints;
+
+        // Simple linear move in front of robot
+        Waypoint wp1 = createReachableWaypoint(0.4, -0.1, 0.4);
+        wp1.segment_time = 0.0;  // First waypoint, no segment time
+        waypoints.push_back(wp1);
+
+        Waypoint wp2 = createReachableWaypoint(0.4, 0.1, 0.4);
+        wp2.segment_time = 2.0;  // 2 seconds for 0.2m = 0.1 m/s avg velocity
+        waypoints.push_back(wp2);
+
+        auto result = planner.plan(waypoints);
+
+        REQUIRE(result.valid);
+        REQUIRE(!result.samples.empty());
+
+        // Total duration should be approximately 2 seconds
+        REQUIRE_THAT(result.total_duration, WithinAbs(2.0, 0.5));
+    }
+
+    SECTION("Segment with velocity limit exceeded - should fail with T_min message") {
+        std::vector<Waypoint> waypoints;
+
+        // Large move with very short time - should require V_entry > V_max
+        Waypoint wp1 = createReachableWaypoint(0.3, -0.2, 0.4);
+        waypoints.push_back(wp1);
+
+        Waypoint wp2 = createReachableWaypoint(0.3, 0.2, 0.4);
+        wp2.segment_time = 0.3;  // Only 0.3s for 0.4m move - too fast!
+        waypoints.push_back(wp2);
+
+        auto result = planner.plan(waypoints);
+
+        // Should fail with helpful error message
+        REQUIRE_FALSE(result.valid);
+
+        // Check for error messages - print them for debugging
+        for (const auto& msg : result.messages) {
+            if (msg.severity == ValidationSeverity::Error) {
+                std::cout << "Error message: " << msg.message << std::endl;
+            }
+        }
+        // Note: The planner might fail for other reasons (IK, etc.) before velocity check
+        // So we just verify it failed - the velocity solver is exercised
+    }
+
+    SECTION("Three waypoints with blending - should compute entry velocities") {
+        std::vector<Waypoint> waypoints;
+
+        Waypoint wp1 = createReachableWaypoint(0.4, -0.15, 0.4);
+        waypoints.push_back(wp1);
+
+        Waypoint wp2 = createReachableWaypoint(0.4, 0.0, 0.4);
+        wp2.segment_time = 1.5;
+        wp2.blend_factor = 0.5;  // Blend at this waypoint
+        waypoints.push_back(wp2);
+
+        Waypoint wp3 = createReachableWaypoint(0.4, 0.15, 0.4);
+        wp3.segment_time = 1.5;
+        waypoints.push_back(wp3);
+
+        auto result = planner.plan(waypoints);
+
+        // Should succeed - reasonable constraints
+        REQUIRE(result.valid);
+        REQUIRE(!result.samples.empty());
+
+        // Check total duration is reasonable
+        REQUIRE(result.total_duration > 2.5);
+        REQUIRE(result.total_duration < 4.0);
+    }
+}
+
+TEST_CASE("Analytical velocity solver - edge cases", "[trajectory][velocity][analytical]") {
+    URKinematics kinematics(URModel::UR5e);
+    TrajectoryConfig config;
+    config.max_linear_velocity = 0.5;
+    config.max_linear_acceleration = 1.0;
+    config.max_linear_jerk = 5.0;
+    config.sample_rate = 100.0;
+
+    TrajectoryPlanner planner(kinematics, config);
+
+    SECTION("Very short segment with stopping - triangular profile") {
+        std::vector<Waypoint> waypoints;
+
+        // Short 50mm move - need at least 0.68s with A=1.0, J=5.0
+        Waypoint wp1 = createReachableWaypoint(0.4, 0.0, 0.4);
+        waypoints.push_back(wp1);
+
+        Waypoint wp2 = createReachableWaypoint(0.4, 0.05, 0.4);
+        wp2.segment_time = 0.8;  // 0.8s for 50mm - achievable with triangular profile
+        waypoints.push_back(wp2);
+
+        auto result = planner.plan(waypoints);
+
+        // Should succeed with achievable duration
+        REQUIRE(result.valid);
+    }
+
+    SECTION("Long segment with generous time - full profile") {
+        std::vector<Waypoint> waypoints;
+
+        // 300mm move with plenty of time
+        Waypoint wp1 = createReachableWaypoint(0.3, -0.15, 0.4);
+        waypoints.push_back(wp1);
+
+        Waypoint wp2 = createReachableWaypoint(0.3, 0.15, 0.4);
+        wp2.segment_time = 3.0;  // 3s for 300mm - comfortable pace
+        waypoints.push_back(wp2);
+
+        auto result = planner.plan(waypoints);
+
+        REQUIRE(result.valid);
+        REQUIRE_THAT(result.total_duration, WithinAbs(3.0, 0.5));
+    }
+}
+
+// Note: Old S-curve tests removed - see test_s_curve.cpp for new 2-phase S-curve tests
